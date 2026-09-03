@@ -1,0 +1,33 @@
+{
+  "targetDir": "../../examples/game2048",
+  "promptFile": "./PROMPT.md",
+  "progressFile": "./PROGRESS.md",
+  "runsDir": "../../runs/2048-01-core",
+  "verify": {
+    "command": "node --test test/game.test.mjs",
+    "tailLines": 80,
+    "timeoutSec": 300
+  },
+  "agent": {
+    "command": "claude",
+    "args": [
+      "-p",
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowedTools",
+      "Read,Edit,Write,Glob,Grep,Bash(node:*),PowerShell(node:*)",
+      "--max-turns",
+      "40"
+    ],
+    "timeoutSec": 1800
+  },
+  "loop": {
+    "maxIterations": 6,
+    "maxCostUsd": 2.5,
+    "stuckWarnAfter": 2,
+    "stuckStopAfter": 4,
+    "doneMarker": "<promise>COMPLETE</promise>"
+  }
+}
