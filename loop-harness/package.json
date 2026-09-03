@@ -1,0 +1,17 @@
+{
+  "name": "loop-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ループエンジニアリングのハーネス: 外部検証を真実として Claude Code を反復起動するランナー",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "loop": "node bin/loop.mjs",
+    "loop:mock": "node bin/loop.mjs --task slugify --agent \"node ../mock-agent.mjs\"",
+    "verify": "node bin/loop.mjs --verify-only",
+    "new-task": "node bin/new-task.mjs",
+    "reset:example": "node bin/reset-example.mjs"
+  }
+}
