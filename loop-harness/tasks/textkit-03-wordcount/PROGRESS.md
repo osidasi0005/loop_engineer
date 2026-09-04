@@ -19,3 +19,22 @@
 
 
 - [ランナー] 反復 1: 検証 FAIL → エージェント 7 ターン / $0.3426
+
+### 反復 2
+
+やったこと:
+- 完了条件を 1 つずつ確認した。
+  1. `node --test test/contract.test.mjs test/wordcount.test.mjs` を再実行 → 7 pass / 0 fail（ランナーの検証結果も PASS）。
+  2. `examples/textkit` に `package.json` は存在せず、依存追加なし。
+  3. `git log --stat` で自分のコミット（1c46587）の変更は `src/wordcount.mjs` 1 ファイルのみ。`test/` と `src/contract.mjs` は未変更。
+  4. `wordCount` に 3 行の JSDoc（説明 2 行 + `@param`/`@returns`）あり。
+- コード変更は不要と判断し、追加の編集は行っていない。
+
+分かったこと:
+- 反復 1 の実装がそのまま完成形。作業ツリーは clean で、実装は既にコミット済み（1c46587）。
+- `git diff main...HEAD` に `loop-harness/package.json` の M が出るが、これはブランチ分岐前からの他タスク由来の差分で、本タスクの変更ではない。
+
+次にやるべきこと:
+- なし。完了条件をすべて満たしたので完了宣言する。
+
+- [ランナー] 反復 2: 検証 PASS → エージェント 7 ターン / $0.3655 / 完了宣言あり
