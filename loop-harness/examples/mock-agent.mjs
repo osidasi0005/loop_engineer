@@ -7,16 +7,31 @@
 //
 // 振る舞い（わざと 1 回失敗して、ループが失敗を拾って直す様子を見せる）:
 //   検証 FAIL & src/slugify.mjs が無い → 不完全な実装を書く
-//   検証 FAIL & src/slugify.mjs がある → 検証出力を見て正しい実装に直す
-//   検証 PASS                          → 完了条件を確認し、完了マーカーを返す
+//   検証 FAIL & src/slugify.mjs がある → 検証出力を見て正しい実装に直し、検証コマンドを自分で実行して
+//                                        PASS なら完了条件を確認して完了マーカーを返す（ランナーが次の反復で確定する）
+//   検証 PASS                          → 完了条件を確認し、完了マーカーを返す（本物の Claude が反復 2 で
+//                                        マーカーを書かなかったときに通る経路。モックの筋書きでは通らない）
+//   MOCK_SPEC_ISSUE=1                  → 仕様の抜けを <spec-issue> で報告する経路も見せる
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 const prompt = readFileSync(0, 'utf8');
 const iteration = Number(prompt.match(/反復 (\d+)\//)?.[1] ?? 0);
 const verifyPassed = /検証: PASS/.test(prompt);
 const doneMarker = prompt.match(/末尾に (<promise>[^<]+<\/promise>)/)?.[1] ?? '<promise>COMPLETE</promise>';
+const verifyCommand = prompt.match(/直前の検証結果（コマンド: `([^`]+)`）/)?.[1] ?? null;
 const progressFile = process.env.LOOP_PROGRESS_FILE;
+const specIssue = process.env.MOCK_SPEC_ISSUE === '1'
+  ? '\n\n<spec-issue>仕様は「先頭末尾のハイフンを除去」とだけ書いているが、テストは「連続するハイフンも 1 つにまとめる」ことを期待している。テストに合わせて実装した。仕様に明記した方がよい。</spec-issue>'
+  : '';
+
+// 検証コマンドを自分で実行する（本物のエージェントが「直した → 自分でテストを回す」に相当）
+function selfVerify() {
+  if (!verifyCommand) return false;
+  const r = spawnSync(verifyCommand, { shell: true, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  return r.status === 0;
+}
 
 const naive = `/** 文字列を URL スラッグに変換する（暫定版） */
 export function slugify(text) {
@@ -62,12 +77,22 @@ if (verifyPassed) {
     ),
   ];
   writeFileSync('src/slugify.mjs', correct);
-  note([
-    `やったこと: 失敗していたテスト（${failing.join(' / ') || '不明'}）を直した`,
-    '分かったこと: 先頭末尾のハイフン除去と NFD 正規化によるアクセント除去が抜けていた',
-    '次にやるべきこと: 検証が通ったら完了条件を確認する',
-  ]);
-  result = `失敗していたケースを修正しました: ${failing.join(', ')}`;
+  const passed = selfVerify();
+  if (passed) {
+    note([
+      `やったこと: 失敗していたテスト（${failing.join(' / ') || '不明'}）を直し、検証コマンドを自分で実行して PASS を確認。完了条件 1〜4 を確認（テスト PASS、依存なし、test/ 未変更、JSDoc あり）`,
+      '分かったこと: 先頭末尾のハイフン除去と NFD 正規化によるアクセント除去が抜けていた',
+      '次にやるべきこと: なし（ランナーの検証で確定を待つ）',
+    ]);
+    result = `失敗していたケースを修正し、検証コマンドを自分で実行して PASS しました: ${failing.join(', ')}\n完了条件をすべて確認しました。${specIssue}\n\n${doneMarker}`;
+  } else {
+    note([
+      `やったこと: 失敗していたテスト（${failing.join(' / ') || '不明'}）を直した（自分で実行した検証はまだ FAIL）`,
+      '分かったこと: 先頭末尾のハイフン除去と NFD 正規化によるアクセント除去が抜けていた',
+      '次にやるべきこと: 検証が通ったら完了条件を確認する',
+    ]);
+    result = `失敗していたケースを修正しました: ${failing.join(', ')}${specIssue}`;
+  }
 }
 
 process.stdout.write(

@@ -159,3 +159,24 @@ push 前に `git reset --soft` で分割し直した。
 
 人間側の作業: 画面案の作成、テスト 4 本とプローブ、仕様 4 本、環境準備（npm install、electron-builder の下見）、
 スクリーンショットの確認、Smart App Control への対処（配布形式の変更）、README。
+
+---
+
+## 実装状況（2026-09-04、ブランチ claude/loop-engineering-improvements-18fd52）
+
+7 件すべてを取り込んだ。経緯と動作確認は [実装ログ](2026-09-04_impl-log.md) の「3. 2048 デスクトップ版の開発で見つかった改善 7 件」。
+
+| # | 改善点 | 実装 | 確認 |
+|---|---|---|---|
+| 1 | 「確認だけの反復」を減らす | `loop.mjs` `buildPrompt` の `rulesFail` を「自分で検証して PASS し、完了条件を全部確認したならマーカーを書いてよい」に緩和。ランナーの 2 段構えは不変 | モックを「直す → 自分で検証 → 宣言」に変更。`npm run loop:mock` がエージェント起動 2 回・反復 3 回で完了 |
+| 2 | 内側のエージェントに git を渡さない | `loop.mjs` が `claude` を起動するとき常に `--disallowedTools "Bash(git:*),PowerShell(git:*)"` を付ける（既存の `--disallowedTools` には値を足す）。`agent.allowGit: true` で解除。`new-task.mjs` の雛形に `allowGit: false` を出す。2048 のタスク設定から個別指定を外した | 偽 `claude.cmd` に渡った引数を記録して確認（`WebFetch` → `WebFetch,Bash(git:*),PowerShell(git:*)`、`allowGit` で付かない） |
+| 3 | ランナーの git ロック衝突 | `commitIteration` の `git add` / `git commit` を `index.lock` 検知で 0.7 秒 × 最大 5 回再試行。失敗理由は stderr（無ければ exit code）。失敗時は `git reset -q -- <targetDir> <PROGRESS.md>` で自分が add した分だけ戻す | スクラッチのリポジトリで `index.lock` を置いて実行 → 3.5 秒で 5 回再試行して失敗、ステージ空。pre-commit フックで commit だけ失敗させる → ステージ空、作業ツリーに差分が残る |
+| 4 | 見た目の検証をハーネスの仕組みに | `verify.artifacts`（glob 配列）を `runs/<日時>/artifacts/iter-NN/` にコピー（判定には使わない）。`new-task.mjs --electron` が汎用プローブ `test/helpers/probe.cjs` と存在チェック付き `test/smoke.test.mjs` を作業対象に置く。README に「UI の仕様は計算済みの色と寸法で書く」 | 検証コマンドが `shots/a.png` を吐く設定で反復ごとにコピーされることを確認。`--electron` の雛形を 2048 の `app/` に向けて実行 → 2 件 PASS、`app/` 無しで 0.2 秒 FAIL |
+| 5 | 仕様の穴の指摘を構造化 | プロンプトのルール 5 に `<spec-issue>…</spec-issue>`。`loop.mjs` が抜き出して `iter-NN.md` / `summary.json` の `specIssues` / 終了時の標準出力に列挙。`wave.mjs` は各タスクと fix ループの summary から集めて `wave-summary.json` と終了時に列挙 | `MOCK_SPEC_ISSUE=1 npm run loop:mock` で 1 件が 3 か所に出ることを確認。wave は `--dry-run` と構文のみ |
+| 6 | ループ前の環境準備 | `setup.command`（+ `timeoutSec`）を反復 1 の前に 1 回実行し `runs/<日時>/setup.md` に記録。失敗なら `status: setup_failed` で開始しない。スタック警告に「環境の問題なら進捗メモに根拠を書いて終了。人間が直す」、スタック停止時の終了メッセージにも同じ注意 | `exit 3` する setup で開始せず終了、`setup.md` に出力が残る。成功する setup で通常どおり反復に入る |
+| 7 | 未実装時のスモークを即 FAIL | `examples/game2048/test/{app,style,build}.test.mjs` の起動ヘルパーの先頭で `app/main.cjs` / `app/index.html` 等 / exe の存在を `assert` | 実装あり: 24 件 PASS 4.3 秒。`app/` 無し: 0.3 秒で全件 FAIL（以前は 135 秒） |
+
+やっていないこと:
+
+- 本物の Claude での再計測（項目 1 の「1 タスク 1 反復減」は、次に本物で回すタスクで確かめる）
+- wave ランナーの spec-issue 集約は本物・モックとも実走していない（モックの textkit は spec-issue を出さない）

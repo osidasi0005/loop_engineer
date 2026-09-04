@@ -2,6 +2,7 @@
 // loop.mjs — ループエンジニアリングのランナー
 //
 // 「AI を賢くする」のではなく「AI を回す構造」を設計する。
+//   0. （反復 1 の前に 1 回だけ）setup.command で環境を整える。失敗したらループを始めない
 //   1. 外部検証（テスト等）を実行し、真実はここから取る
 //   2. 仕様 + 進捗メモ + 検証結果 で毎回新鮮なプロンプトを組み立てる
 //   3. エージェント（既定: claude -p）を 1 回だけ走らせる
@@ -14,8 +15,8 @@
 // tasks/ にタスクが 1 つだけならそれを使う。
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, readdirSync } from 'node:fs';
-import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, readdirSync, copyFileSync, globSync, statSync } from 'node:fs';
+import { resolve, dirname, join, isAbsolute, relative, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -101,8 +102,11 @@ function loadConfig(path, overrides) {
   cfg.promptFile = abs(cfg.promptFile ?? 'PROMPT.md');
   cfg.progressFile = abs(cfg.progressFile ?? 'PROGRESS.md');
   cfg.runsDir = abs(cfg.runsDir ?? 'runs');
-  cfg.verify = { tailLines: 60, timeoutSec: 300, ...cfg.verify };
-  cfg.agent = { command: 'claude', args: ['-p', '--output-format', 'json'], timeoutSec: 1800, ...cfg.agent };
+  cfg.verify = { tailLines: 60, timeoutSec: 300, artifacts: [], ...cfg.verify };
+  if (typeof cfg.verify.artifacts === 'string') cfg.verify.artifacts = [cfg.verify.artifacts];
+  // setup: 反復 1 の前に 1 回だけ実行する環境準備（npm install など）。失敗したらループを始めない
+  cfg.setup = { command: null, timeoutSec: 900, ...cfg.setup };
+  cfg.agent = { command: 'claude', args: ['-p', '--output-format', 'json'], timeoutSec: 1800, allowGit: false, ...cfg.agent };
   cfg.loop = {
     maxIterations: 10,
     maxCostUsd: 5,
@@ -120,6 +124,7 @@ function loadConfig(path, overrides) {
     // 文字列コマンドはそのままシェルに渡す（stdin でプロンプトを受け取る前提）
     cfg.agent = { ...cfg.agent, command: overrides.agentCommand, args: [] };
   }
+  if (isClaudeAgent(cfg.agent) && !cfg.agent.allowGit) cfg.agent.args = withGitDisallowed(cfg.agent.args);
   if (!cfg.verify.command) fail('verify.command が設定されていません');
   if (!existsSync(cfg.promptFile)) fail(`仕様ファイルがありません: ${cfg.promptFile}`);
   if (!existsSync(cfg.targetDir)) fail(`対象ディレクトリがありません: ${cfg.targetDir}`);
@@ -141,6 +146,32 @@ function remapIntoWorktree(cfg, worktree) {
   cfg.progressFile = remap(cfg.progressFile);
   cfg.worktree = worktree;
   if (!existsSync(cfg.targetDir)) fail(`worktree 内に作業対象がありません: ${cfg.targetDir}`);
+}
+
+// ---------- 内側のエージェントから git を隠す ----------
+// コミットするのはランナー。プロジェクトの .claude/settings.json の許可リスト（例: Bash(git commit *)）は
+// claude -p で起動した内側のエージェントにも効くため、--allowedTools に git を書いていなくても
+// エージェントが自分でコミットしてしまう（2048 デスクトップ版の開発で起きた）。
+// そこで claude を起動するときは常に --disallowedTools で git を明示的に禁止する。
+// 設定で agent.allowGit: true と書いたときだけ外す。
+const GIT_DISALLOWED = ['Bash(git:*)', 'PowerShell(git:*)'];
+
+function isClaudeAgent(agent) {
+  return /^claude(\.exe|\.cmd)?$/i.test(basename(String(agent.command ?? '').trim()));
+}
+
+// 既に --disallowedTools があればその値に git のパターンを足す（重複させない）。無ければ追加する
+function withGitDisallowed(args) {
+  const out = [...args];
+  const i = out.indexOf('--disallowedTools');
+  if (i >= 0 && i + 1 < out.length) {
+    const have = String(out[i + 1]).split(',').map((s) => s.trim()).filter(Boolean);
+    for (const p of GIT_DISALLOWED) if (!have.includes(p)) have.push(p);
+    out[i + 1] = have.join(',');
+  } else {
+    out.push('--disallowedTools', GIT_DISALLOWED.join(','));
+  }
+  return out;
 }
 
 // ---------- ユーティリティ ----------
@@ -190,6 +221,54 @@ function runVerify(cfg) {
   };
 }
 
+// ---------- 検証が生成した成果物（スクリーンショット等）の保存 ----------
+// verify.artifacts（targetDir からの相対 glob）に一致したファイルを runs/<日時>/artifacts/iter-NN/ にコピーする。
+// 人間がループ終了後に反復ごとの画像を並べて見るためのもので、ループの判定には使わない
+// （画像の良し悪しは自動で判定しない。判定に使いたければテストに落とす）。
+function collectArtifacts(cfg, runDir, n) {
+  if (!cfg.verify.artifacts.length) return [];
+  let matched = [];
+  try {
+    matched = globSync(cfg.verify.artifacts, { cwd: cfg.targetDir, exclude: (name) => name === 'node_modules' });
+  } catch (e) {
+    console.log(`[${n}] 成果物の検索に失敗: ${e.message}`);
+    return [];
+  }
+  const dest = join(runDir, 'artifacts', `iter-${String(n).padStart(2, '0')}`);
+  const saved = [];
+  for (const rel of matched) {
+    const src = join(cfg.targetDir, rel);
+    if (!existsSync(src) || !statSync(src).isFile()) continue;
+    const to = join(dest, rel);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(src, to);
+    saved.push(rel.split('\\').join('/'));
+  }
+  return saved;
+}
+
+// ---------- ループ前の環境準備 ----------
+// エージェントはネットワーク禁止なので、npm install などは反復 1 の前にランナーが 1 回だけ行う。
+// 結果は runs/<日時>/setup.md に残す（進捗メモにもコミットにも残らない「環境の準備」を記録に残すため）。
+function runSetup(cfg, runDir) {
+  const r = runShell(cfg.setup.command, { cwd: cfg.targetDir, timeoutSec: cfg.setup.timeoutSec });
+  const ok = r.code === 0 && !r.timedOut && !r.error;
+  const combined = [r.stdout, r.stderr].filter(Boolean).join('\n').trim();
+  const body = `# 環境準備（反復 1 の前に 1 回だけ実行）
+
+- コマンド: \`${cfg.setup.command}\`
+- 作業ディレクトリ: ${cfg.targetDir}
+- 結果: ${ok ? 'OK' : 'FAIL'} / exit ${r.code ?? 'n/a'}${r.timedOut ? ' / timeout' : ''}${r.error ? ` / ${r.error}` : ''} / ${r.ms}ms
+- 実行日時: ${new Date().toISOString()}
+
+\`\`\`
+${tail(combined, 200) || '(出力なし)'}
+\`\`\`
+`;
+  writeFileSync(join(runDir, 'setup.md'), body);
+  return { ok, code: r.code, timedOut: r.timedOut, error: r.error, ms: r.ms, output: tail(combined, 20) };
+}
+
 // ---------- プロンプト組み立て ----------
 function buildPrompt(cfg, state, verify) {
   const spec = readFileSync(cfg.promptFile, 'utf8').trim();
@@ -208,6 +287,8 @@ function buildPrompt(cfg, state, verify) {
 前回までのアプローチは機能していません。同じ修正を繰り返さず、
 - 失敗の原因を仮説として進捗メモに書き出してから、
 - これまでと異なる方法で直してください。
+失敗の原因がコードではなく環境（依存パッケージの欠落、権限、ネットワーク、外部ツールの不在）にあると判断したら、
+無理に回避せず、進捗メモにその根拠を書いて終了してください。環境の問題は人間が直します。
 あと ${cfg.loop.stuckStopAfter - state.sameFailureCount} 回同じ失敗が続くとループは停止します。
 `;
   }
@@ -215,8 +296,12 @@ function buildPrompt(cfg, state, verify) {
   const rulesPass = `検証はすでに成功しています。仕様の完了条件を 1 つずつ確認し、
 すべて満たしていれば最終メッセージの末尾に ${cfg.loop.doneMarker} と書いてください。
 満たしていない条件があれば、その条件を満たす作業を行い、マーカーは書かないでください。`;
+  // FAIL 起点でも、エージェントが自分で検証を回して PASS し、完了条件を全部確認したなら宣言してよい。
+  // 完了判定は次の反復でランナーが検証して行うので、「宣言だけの反復」を 1 回分省ける（費用 約 3 割減）。
   const rulesFail = `検証が失敗しています。失敗を直すための最も重要な 1 つの作業に集中してください。
-自分で「できた」と思っても、次の検証が通るまでは未完了です。${cfg.loop.doneMarker} は書かないでください。`;
+直した後、検証コマンド \`${cfg.verify.command}\` を自分で実行して PASS し、さらに仕様の完了条件を 1 つずつ確認して
+すべて満たしていれば、最終メッセージの末尾に ${cfg.loop.doneMarker} と書いてよいです（次の反復でランナーが検証して確定します）。
+自分で検証していない、または満たしていない条件があるなら、マーカーは書かないでください。`;
 
   return `# 自律ループ 反復 ${n}/${max}
 
@@ -239,7 +324,16 @@ ${stuckBlock}
    \`### 反復 ${n}\` / やったこと / 分かったこと / 次にやるべきこと
 3. 仕様に書かれていないファイルの削除や外部への送信は行わない。
 4. 検証コマンドは自分で実行してもよいが、最終判断はランナーの検証結果に従う。
+5. 仕様の抜け・曖昧さ・テストとの矛盾に気づいたら、最終メッセージに <spec-issue>…</spec-issue> で囲んで 1 件ずつ書く
+   （どこが・なぜ・どう解釈して進めたか）。ランナーが拾って人間に見せる。仕様やテストは変えない。
 `;
+}
+
+// 応答から <spec-issue>…</spec-issue> を抜き出す（項目 5: 仕様の穴の指摘を進捗メモに埋もれさせない）
+function extractSpecIssues(text) {
+  return [...String(text ?? '').matchAll(/<spec-issue>([\s\S]*?)<\/spec-issue>/g)]
+    .map((m) => m[1].trim())
+    .filter(Boolean);
 }
 
 // ---------- エージェント ----------
@@ -311,10 +405,31 @@ function extractProgressBlock(progressText, n) {
   return m ? m[1].trim() : '';
 }
 
+// 人間が同じリポジトリで git を触っている最中だと .git/index.lock で失敗する。
+// 短い間隔で数回再試行し、それでも駄目ならステージを戻して（自分が add した分だけ）理由を返す。
+// 戻さないと、エージェントの差分が人間の次のコミットに混ざる（実際に起きた）。
+const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const gitReason = (r) => r.stderr || r.error || `exit ${r.code}`;
+const isLockError = (r) => /index\.lock|Unable to create|Another git process/i.test(`${r.stderr}\n${r.error}`);
+
+function runGitRetry(args, cwd, { tries = 5, waitMs = 700 } = {}) {
+  let r = runGit(args, cwd);
+  for (let i = 1; i < tries && r.code !== 0 && (isLockError(r) || !r.stderr); i++) {
+    sleepMs(waitMs);
+    r = runGit(args, cwd);
+  }
+  return r;
+}
+
 function commitIteration(cfg, repo, runDir, n, { verify, agent, saidDone }) {
   const cwd = repo.toplevel;
-  const add = runGit(['add', '-A', '--', cfg.targetDir, cfg.progressFile], cwd);
-  if (add.code !== 0) return { ok: false, reason: `git add 失敗: ${add.stderr || add.error}` };
+  const paths = ['--', cfg.targetDir, cfg.progressFile];
+  const unstage = () => runGit(['reset', '-q', ...paths], cwd);
+  const add = runGitRetry(['add', '-A', ...paths], cwd);
+  if (add.code !== 0) {
+    unstage();
+    return { ok: false, reason: `git add 失敗: ${gitReason(add)}（ステージを戻した）` };
+  }
   const staged = runGit(['diff', '--cached', '--quiet'], cwd);
   if (staged.code === 0) return { ok: false, reason: '差分なし' };
 
@@ -332,23 +447,32 @@ function commitIteration(cfg, repo, runDir, n, { verify, agent, saidDone }) {
   const msgFile = join(runDir, `commit-${String(n).padStart(2, '0')}.txt`);
   writeFileSync(msgFile, message);
 
-  const commit = runGit(['commit', '-q', '-F', msgFile], cwd);
-  if (commit.code !== 0) return { ok: false, reason: `git commit 失敗: ${commit.stderr || commit.error}` };
+  const commit = runGitRetry(['commit', '-q', '-F', msgFile], cwd);
+  if (commit.code !== 0) {
+    unstage();
+    return { ok: false, reason: `git commit 失敗: ${gitReason(commit)}（ステージを戻した。差分は作業ツリーに残っている）` };
+  }
   const sha = runGit(['rev-parse', '--short', 'HEAD'], cwd).stdout;
   return { ok: true, sha, subject };
 }
 
 // ---------- ログ ----------
-function writeIterationLog(runDir, n, { prompt, verify, agent }) {
+function writeIterationLog(runDir, n, { prompt, verify, agent, artifacts = [], specIssues = [] }) {
   const file = join(runDir, `iter-${String(n).padStart(2, '0')}.md`);
   const stderrBlock = agent.stderr.trim()
     ? `\n### stderr\n\`\`\`\n${tail(agent.stderr.trim(), 40)}\n\`\`\`\n`
+    : '';
+  const artifactsBlock = artifacts.length
+    ? `- 成果物（artifacts/iter-${String(n).padStart(2, '0')}/）: ${artifacts.join(', ')}\n`
+    : '';
+  const specBlock = specIssues.length
+    ? `\n### 仕様への指摘（spec-issue）\n${specIssues.map((s) => `- ${s.replace(/\n/g, '\n  ')}`).join('\n')}\n`
     : '';
   const body = `# 反復 ${n}
 
 ## 検証（エージェント実行前）
 - 結果: ${verify.ok ? 'PASS' : 'FAIL'} / exit ${verify.code} / ${verify.ms}ms / hash ${verify.hash}
-\`\`\`
+${artifactsBlock}\`\`\`
 ${verify.output}
 \`\`\`
 
@@ -363,7 +487,7 @@ ${prompt}
 \`\`\`
 ${agent.result.trim()}
 \`\`\`
-${stderrBlock}`;
+${specBlock}${stderrBlock}`;
   writeFileSync(file, body);
   return file;
 }
@@ -392,12 +516,29 @@ function main() {
     agentSaidDone: false,
     status: 'running',
     iterations: [],
+    specIssues: [], // エージェントが <spec-issue> で報告した仕様の抜け・矛盾（{ iteration, text }）
+    setup: null,
   };
   const summaryPath = join(runDir, 'summary.json');
   const saveSummary = () =>
     writeFileSync(summaryPath, JSON.stringify({ config: cfg, ...state }, null, 2));
 
   console.log(`[loop] 開始  対象=${cfg.targetDir}  最大${cfg.loop.maxIterations}回  予算$${cfg.loop.maxCostUsd}  ログ=${runDir}`);
+  if (isClaudeAgent(cfg.agent)) console.log(`[loop] 内側のエージェントの git: ${cfg.agent.allowGit ? '許可（agent.allowGit）' : '禁止（--disallowedTools）'}`);
+
+  // 0. 環境準備（反復 1 の前に 1 回だけ）。失敗したらループを始めない
+  if (cfg.setup.command) {
+    console.log(`[loop] 環境準備: ${cfg.setup.command}`);
+    const s = runSetup(cfg, runDir);
+    state.setup = { ok: s.ok, code: s.code, ms: s.ms };
+    console.log(`[loop] 環境準備 ${s.ok ? 'OK' : 'FAIL'} (exit ${s.code}, ${s.ms}ms)  記録=${join(runDir, 'setup.md')}`);
+    if (!s.ok) {
+      state.status = 'setup_failed';
+      saveSummary();
+      console.log(`${s.output}\n[loop] 終了: 環境準備に失敗（ループは開始していません。環境の問題は人間が直してください）  概要=${summaryPath}`);
+      process.exit(1);
+    }
+  }
 
   let repo = null;
   if (cfg.git.autoCommit) {
@@ -416,12 +557,13 @@ function main() {
 
     // 1. 検証（真実の源）
     const verify = runVerify(cfg);
-    console.log(`[${n}] 検証 ${verify.ok ? 'PASS' : 'FAIL'} (exit ${verify.code}, ${verify.ms}ms)`);
+    const artifacts = collectArtifacts(cfg, runDir, n);
+    console.log(`[${n}] 検証 ${verify.ok ? 'PASS' : 'FAIL'} (exit ${verify.code}, ${verify.ms}ms)${artifacts.length ? `  成果物 ${artifacts.length} 件` : ''}`);
 
     // 2. 完了判定: 検証 PASS かつ 前回エージェントが完了を宣言
     if (verify.ok && state.agentSaidDone) {
       state.status = 'complete';
-      state.iterations.push({ n, verify: { ok: true, hash: verify.hash }, agent: null });
+      state.iterations.push({ n, verify: { ok: true, hash: verify.hash }, agent: null, artifacts });
       break;
     }
 
@@ -444,7 +586,9 @@ function main() {
     const agent = runAgent(cfg, prompt);
     state.totalCostUsd += agent.costUsd;
     state.agentSaidDone = agent.result.includes(cfg.loop.doneMarker);
-    const logFile = writeIterationLog(runDir, n, { prompt, verify, agent });
+    const specIssues = extractSpecIssues(agent.result);
+    for (const text of specIssues) state.specIssues.push({ iteration: n, text });
+    const logFile = writeIterationLog(runDir, n, { prompt, verify, agent, artifacts, specIssues });
     appendFileSync(
       cfg.progressFile,
       `\n- [ランナー] 反復 ${n}: 検証 ${verify.ok ? 'PASS' : 'FAIL'} → エージェント ${agent.turns} ターン / $${agent.costUsd.toFixed(4)}${state.agentSaidDone ? ' / 完了宣言あり' : ''}${agent.isError ? ' / エラー' : ''}\n`,
@@ -462,11 +606,13 @@ function main() {
       verify: { ok: verify.ok, code: verify.code, hash: verify.hash },
       agent: { code: agent.code, ms: agent.ms, turns: agent.turns, costUsd: agent.costUsd, isError: agent.isError, saidDone: state.agentSaidDone },
       commit,
+      artifacts,
+      specIssues,
       log: logFile,
     });
     saveSummary();
     console.log(
-      `[${n}] エージェント ${agent.isError ? 'ERROR' : 'OK'} ${agent.ms}ms $${agent.costUsd.toFixed(4)} 累計$${state.totalCostUsd.toFixed(4)}${state.agentSaidDone ? ' 完了宣言あり（次の検証で確認）' : ''}${commit ? ` コミット ${commit}` : ''}`,
+      `[${n}] エージェント ${agent.isError ? 'ERROR' : 'OK'} ${agent.ms}ms $${agent.costUsd.toFixed(4)} 累計$${state.totalCostUsd.toFixed(4)}${state.agentSaidDone ? ' 完了宣言あり（次の検証で確認）' : ''}${commit ? ` コミット ${commit}` : ''}${specIssues.length ? ` 仕様への指摘 ${specIssues.length} 件` : ''}`,
     );
 
     // 5. 停止条件
@@ -496,6 +642,13 @@ function main() {
     budget_exceeded: '予算超過',
     max_iterations: '最大反復回数に到達（未完了）',
   }[state.status];
+  if (state.status === 'stuck') {
+    console.log('[loop] 同じ失敗が続く原因が環境（依存パッケージ・権限・ネットワーク・外部ツール）にあるなら、ループでは直りません。人間が直してから再実行してください。');
+  }
+  if (state.specIssues.length) {
+    console.log(`[loop] 仕様への指摘 ${state.specIssues.length} 件（エージェントが <spec-issue> で報告。仕様を見直してください）:`);
+    for (const s of state.specIssues) console.log(`  - [反復 ${s.iteration}] ${s.text.replace(/\s*\n\s*/g, ' ')}`);
+  }
   console.log(`[loop] 終了: ${label}  反復${state.iteration}回  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
 }

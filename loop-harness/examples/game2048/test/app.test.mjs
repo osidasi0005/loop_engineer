@@ -18,8 +18,11 @@ const electronPath = createRequire(import.meta.url)('electron');
 /**
  * `electron . --smoke --user-data <dir>` を起動し、stdout / exit code を返す。
  * ELECTRON_RUN_AS_NODE が親環境に残っていると Electron が素の Node として動くので必ず外す。
+ * 起動前に app/main.cjs の存在を assert する。未実装のまま起動すると 1 本ごとに 45 秒のタイムアウトまで待つ
+ * （反復 1 の検証が 135 秒かかった）。存在チェックなら数秒で FAIL になる。
  */
 function runSmoke(userData) {
+  assert.ok(existsSync(join(appDir, 'main.cjs')), 'app/main.cjs がない（未実装）。Electron を起動せずに FAIL にする');
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const r = spawnSync(electronPath, [root, '--smoke', '--user-data', userData], {

@@ -14,6 +14,8 @@ const zipFile = join(root, 'dist', '2048-win-x64.zip');
 const electronExe = join(root, 'node_modules', 'electron', 'dist', 'electron.exe');
 
 function runExe(exe, userData, timeout) {
+  // 未ビルドのときは起動を試みずに即 FAIL（存在しない exe の spawn はエラーになるが、理由を明示する）
+  assert.ok(existsSync(exe), `${exe} がない（未ビルド）。起動せずに FAIL にする`);
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const r = spawnSync(exe, ['--smoke', '--user-data', userData], { encoding: 'utf8', timeout, env, windowsHide: true });
