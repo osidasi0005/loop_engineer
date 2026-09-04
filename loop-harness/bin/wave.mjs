@@ -9,8 +9,12 @@
 //     2. 各 worktree で loop.mjs --worktree --commit を並列起動（maxParallel まで）
 //     3. 完了（exit 0）したタスクだけを 1 つずつ現在のブランチにマージ。衝突したら abort して未完了扱い
 //     4. 未完了タスクは worktree の PROGRESS.md だけを取り込む（コードは捨てて記憶だけ残す）
-//     5. マージが 1 つでもあれば Wave の統合検証を実行。FAIL なら停止
+//     5. マージが 1 つでもあれば回帰検証（これまでに完了した全タスクの検証コマンドを累積で実行）。FAIL なら停止
 //     6. 未完了が残れば次ラウンド（maxRounds まで）、無ければ次の Wave
+//   全 Wave が終わったら統合検証（wave.config.json の verify.command）を実行。FAIL なら失敗扱い
+//
+//   統合検証を毎 Wave 後に回すと「まだ実装していない後続 Wave のテスト」で落ちるため、
+//   途中は完了済みタスクの検証だけを回帰させ、全体のテストは最後にだけ回す（1 回目の試行で学んだ）。
 //
 // 使い方:  node bin/wave.mjs --wave <名前> [--agent "<cmd>"] [--max-rounds N] [--budget USD]
 //                            [--dry-run] [--keep-worktrees]
@@ -94,13 +98,17 @@ function loadConfig(path, overrides) {
   return cfg;
 }
 
+const readTaskConfig = (id) => JSON.parse(readFileSync(join(tasksDir, id, 'loop.config.json'), 'utf8'));
+
 // タスクの進捗メモの、リポジトリ内での相対パス（未完了タスクの記憶を救うために使う）
 function taskProgressRelPath(id, toplevel) {
-  const cfgPath = join(tasksDir, id, 'loop.config.json');
-  const c = JSON.parse(readFileSync(cfgPath, 'utf8'));
-  const p = resolve(dirname(cfgPath), c.progressFile ?? 'PROGRESS.md');
+  const c = readTaskConfig(id);
+  const p = resolve(join(tasksDir, id), c.progressFile ?? 'PROGRESS.md');
   return isInside(p, toplevel) ? relative(toplevel, p).split('\\').join('/') : null;
 }
+
+// タスク自身の検証コマンド（回帰検証で累積して使う）
+const taskVerifyCommand = (id) => readTaskConfig(id).verify?.command ?? null;
 
 // ---------- ユーティリティ ----------
 const nowStamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -294,15 +302,30 @@ async function main() {
       }
       save();
 
-      // 5. 統合検証（マージが 1 つでもあれば）
+      // 5. 回帰検証（マージが 1 つでもあれば）: これまでに完了した全タスクの検証コマンドを累積で回す。
+      //    Wave 単位で verify が指定されていればそれを使う。全体の統合検証は全 Wave 終了後にだけ行う
       if (mergedCount > 0) {
-        const v = runShell(cfg.verify.command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
-        writeFileSync(join(runDir, `integration-w${wi + 1}-r${round}.txt`), `${cfg.verify.command}\nexit ${v.code} / ${v.ms}ms\n\n${v.output}`);
-        roundState.integration = { ok: v.ok, code: v.code, ms: v.ms };
-        log(`  統合検証 ${v.ok ? 'PASS' : 'FAIL'} (exit ${v.code}, ${v.ms}ms)`);
-        if (!v.ok) {
-          console.log(tail(v.output, cfg.verify.tailLines));
-          state.status = 'integration_failed';
+        const completedSoFar = state.waves.flatMap((w) => Object.entries(w.done).filter(([, d]) => d).map(([id]) => id));
+        const commands = wave.verify ? [wave.verify] : [...new Set(completedSoFar.map(taskVerifyCommand).filter(Boolean))];
+        const results = [];
+        let allOk = true;
+        for (const command of commands) {
+          const v = runShell(command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
+          results.push({ command, ok: v.ok, code: v.code, ms: v.ms, output: v.output });
+          if (!v.ok) {
+            allOk = false;
+            break;
+          }
+        }
+        writeFileSync(
+          join(runDir, `regression-w${wi + 1}-r${round}.txt`),
+          results.map((r) => `$ ${r.command}\nexit ${r.code} / ${r.ms}ms\n\n${r.output}\n`).join('\n' + '='.repeat(60) + '\n'),
+        );
+        roundState.regression = { ok: allOk, commands: results.map(({ command, ok, code, ms }) => ({ command, ok, code, ms })) };
+        log(`  回帰検証 ${allOk ? 'PASS' : 'FAIL'}（完了済み ${completedSoFar.length} タスク / ${commands.length} コマンド）`);
+        if (!allOk) {
+          console.log(tail(results.at(-1).output, cfg.verify.tailLines));
+          state.status = 'regression_failed';
           state.failedAt = { wave: wave.name, round };
           break outer;
         }
@@ -324,7 +347,15 @@ async function main() {
     }
   }
 
-  if (state.status === 'running') state.status = 'complete';
+  // 全 Wave 終了後の統合検証（全体テスト）。ここが真実の源で、エージェントの自己申告は使わない
+  if (state.status === 'running') {
+    const v = runShell(cfg.verify.command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
+    writeFileSync(join(runDir, 'integration.txt'), `$ ${cfg.verify.command}\nexit ${v.code} / ${v.ms}ms\n\n${v.output}`);
+    state.integration = { ok: v.ok, code: v.code, ms: v.ms };
+    log(`統合検証 ${v.ok ? 'PASS' : 'FAIL'} (exit ${v.code}, ${v.ms}ms)`);
+    if (!v.ok) console.log(tail(v.output, cfg.verify.tailLines));
+    state.status = v.ok ? 'complete' : 'integration_failed';
+  }
   state.finishedAt = new Date().toISOString();
   save();
   if (!args.keepWorktrees) rmSync(wtBase, { recursive: true, force: true });
@@ -332,7 +363,8 @@ async function main() {
 
   const label = {
     complete: '完了（全 Wave のタスクをマージし統合検証 PASS）',
-    integration_failed: '統合検証 FAIL（マージ後の全体テストが落ちた）',
+    regression_failed: '回帰検証 FAIL（マージ後に完了済みタスクの検証が落ちた）',
+    integration_failed: '統合検証 FAIL（全 Wave 終了後の全体テストが落ちた）',
     budget_exceeded: '予算超過',
     max_rounds: 'ラウンド上限（未完了タスクあり）',
   }[state.status];
