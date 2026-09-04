@@ -15,7 +15,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, readdirSync } from 'node:fs';
-import { resolve, dirname, join, isAbsolute } from 'node:path';
+import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -39,6 +39,8 @@ function parseArgs(argv) {
     else if (a === '--agent') out.overrides.agentCommand = next();
     else if (a === '--commit') out.overrides.autoCommit = true;
     else if (a === '--no-commit') out.overrides.autoCommit = false;
+    else if (a === '--worktree') out.overrides.worktree = resolve(next());
+    else if (a === '--run-dir') out.overrides.runDir = resolve(next());
     else if (a === '--verify-only') out.verifyOnly = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else fail(`不明な引数: ${a}`);
@@ -60,6 +62,9 @@ function usage() {
   --agent "<cmd>"   エージェント起動コマンドを上書き（作業ディレクトリで実行される。例: "node ../mock-agent.mjs"）
   --commit          反復ごとにランナーが git commit する（進捗メモのブロックを本文に入れる）
   --no-commit       設定で有効でも自動コミットしない
+  --worktree <dir>  作業対象を含むリポジトリのトップレベルを <dir>（git worktree）に差し替える
+                    targetDir と progressFile を worktree 内の同じ相対位置へ写す（wave.mjs が使う）
+  --run-dir <dir>   ログの出力先を指定する（既定は runsDir/<日時>）
   --verify-only     検証コマンドだけ実行して終了
 
 登録済みタスク: ${listTasks().join(', ') || '(なし)'}
@@ -118,7 +123,24 @@ function loadConfig(path, overrides) {
   if (!cfg.verify.command) fail('verify.command が設定されていません');
   if (!existsSync(cfg.promptFile)) fail(`仕様ファイルがありません: ${cfg.promptFile}`);
   if (!existsSync(cfg.targetDir)) fail(`対象ディレクトリがありません: ${cfg.targetDir}`);
+  if (overrides.worktree) remapIntoWorktree(cfg, overrides.worktree);
+  cfg.runDirOverride = overrides.runDir ?? null;
   return cfg;
+}
+
+// --worktree: 作業対象を含むリポジトリのトップレベルを worktree に差し替える。
+// targetDir と progressFile だけを写し、runsDir は写さない（worktree を消してもログが残るように）。
+function remapIntoWorktree(cfg, worktree) {
+  if (!existsSync(worktree)) fail(`worktree がありません: ${worktree}`);
+  const top = runGit(['rev-parse', '--show-toplevel'], cfg.targetDir);
+  if (top.code !== 0 || !top.stdout) fail(`--worktree を使うには作業対象が git リポジトリ内である必要があります: ${cfg.targetDir}`);
+  const toplevel = top.stdout;
+  const remap = (p) => (isInside(p, toplevel) ? join(worktree, relative(toplevel, p)) : p);
+  cfg.originalTargetDir = cfg.targetDir;
+  cfg.targetDir = remap(cfg.targetDir);
+  cfg.progressFile = remap(cfg.progressFile);
+  cfg.worktree = worktree;
+  if (!existsSync(cfg.targetDir)) fail(`worktree 内に作業対象がありません: ${cfg.targetDir}`);
 }
 
 // ---------- ユーティリティ ----------
@@ -358,7 +380,7 @@ function main() {
     process.exit(v.ok ? 0 : 1);
   }
 
-  const runDir = join(cfg.runsDir, nowStamp());
+  const runDir = cfg.runDirOverride ?? join(cfg.runsDir, nowStamp());
   mkdirSync(runDir, { recursive: true });
   if (!existsSync(cfg.progressFile)) writeFileSync(cfg.progressFile, '# 進捗メモ\n\n');
 

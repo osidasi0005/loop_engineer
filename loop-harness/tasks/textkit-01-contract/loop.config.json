@@ -1,0 +1,36 @@
+{
+  "targetDir": "../../examples/textkit",
+  "promptFile": "./PROMPT.md",
+  "progressFile": "./PROGRESS.md",
+  "runsDir": "../../runs/textkit-01-contract",
+  "verify": {
+    "command": "node --test test/contract.test.mjs",
+    "tailLines": 80,
+    "timeoutSec": 300
+  },
+  "git": {
+    "autoCommit": true
+  },
+  "agent": {
+    "command": "claude",
+    "args": [
+      "-p",
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowedTools",
+      "Read,Edit,Write,Glob,Grep,Bash(node:*),PowerShell(node:*)",
+      "--max-turns",
+      "30"
+    ],
+    "timeoutSec": 1200
+  },
+  "loop": {
+    "maxIterations": 6,
+    "maxCostUsd": 2,
+    "stuckWarnAfter": 2,
+    "stuckStopAfter": 4,
+    "doneMarker": "<promise>COMPLETE</promise>"
+  }
+}
