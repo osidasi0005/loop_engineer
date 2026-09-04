@@ -79,3 +79,32 @@ $ node --test "test/**/*.test.mjs"
     diff: 'simple'
   }
 ```
+
+### 反復 1（ラウンド 2・差し戻し後）
+やったこと:
+- ランナーの指示どおり、まず「他のタスクが担当する契約を変更していないか」を確認した。`ELLIPSIS` は変更禁止の `test/` が直接アサートしている共有契約だった。
+- コードは一切変更していない（`src/contract.mjs` は差し戻し後の `'…'` のまま）。前回と同じ変更を再度入れても回帰検証で必ず差し戻されるため。
+- 矛盾の根拠を実ファイルで確認した（下記）。
+
+分かったこと（両立不可能の根拠）:
+- 同一定数 `ELLIPSIS` に対して、直接矛盾する 2 つのアサーションが別々のテストに存在する:
+  - `test-experiments/ellipsis.test.mjs:6` → `assert.equal(ELLIPSIS, '...')`（完了条件 1 が要求）
+  - `test/contract.test.mjs:6` → `assert.equal(ELLIPSIS, '…')`（仕様が変更を禁止）
+  どちらの値を入れても他方が必ず落ちる。実装側のいかなる変更でも同時には満たせない。
+- さらに `test/truncate.test.mjs:7` は `truncate('abcdefghij', 5)` に `'abcd' + ELLIPSIS` を期待するが、`truncate` は
+  `max - ELLIPSIS.length` で切るため、`ELLIPSIS` が 3 文字になると `'ab...'`（4 文字ではなく 2 文字の本文）になる。
+  `ELLIPSIS` を使った式で書かれていても壊れる。ランナーのログの `actual: 'ab...' / expected: 'abcd...'` がこれ。
+  仕様は `src/truncate.mjs` の変更も禁止しているので、こちらも実装側では回避できない。
+- `test/index.test.mjs:15` は `'Hello Wonderful Wor…'` をハードコードしており、同じく実装側では回避できない。
+- 結論: 完了条件 1 とランナーの回帰検証（`test/**/*.test.mjs`）は同時には成立しない。ラウンド 1 で仕様どおり実装して
+  完了条件 1〜4 を満たしたが、回帰検証で差し戻された。同じ変更を繰り返しても結果は変わらない。
+
+次にやるべきこと（人間の判断が必要）:
+- 次のいずれかを人間が決める必要がある。エージェントの権限では選べない（`test/` は変更禁止）。
+  1. `test/contract.test.mjs` / `test/truncate.test.mjs` / `test/index.test.mjs` を `'...'` 前提に更新し、
+     このタスクの仕様に「`test/` の更新も含む」と明記する（破壊的変更として正しく扱う）。
+  2. このタスクを取り下げる。`ELLIPSIS` は複数タスクが共有する契約で、片側だけ変えることはできない。
+  3. `ELLIPSIS` を変えず、ASCII 版を別 export（例 `ELLIPSIS_ASCII`）として追加する仕様に変える。
+     ただし現行の `test-experiments/ellipsis.test.mjs` は `ELLIPSIS` 自体を見ているので、そのテストも要更新。
+
+- [ランナー] 反復 1: 検証 FAIL → エージェント 8 ターン / $0.5729
