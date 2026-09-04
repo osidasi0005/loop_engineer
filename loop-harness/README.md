@@ -226,6 +226,25 @@ node examples/mazechase/src/cli.mjs
 システム規模のものは 1 ループに載せず、`tasks/01-db-schema/`、`tasks/02-user-api/` のように機能単位へ分割して直列に回します。
 各タスクの `targetDir` は同じプロジェクトを指し、前のタスクの成果物が次の前提になります。1 タスクの目安は人間なら半日〜1 日、完了条件は 3〜6 個です。
 
+### 反復ごとに自動コミットする（申し送りをコミット本文に残す）
+
+`loop.config.json` に `"git": { "autoCommit": true }` を書くか、`--commit` を付けて起動すると、
+**ランナーが**各反復の後に `targetDir` 配下と `PROGRESS.md` の差分をコミットします。
+本文にはその反復の進捗メモのブロック（`### 反復 N`）がそのまま入り、末尾に `Loop-Task` / `Loop-Iteration` /
+`Loop-Verify` / `Loop-Cost-Usd` / `Loop-Run` のトレーラーが付きます。
+
+```bash
+node bin/loop.mjs --task slugify --commit
+git log --format='%h %s'          # loop(slugify): 反復 2 検証 FAIL → エージェント 12 ターン
+git log --grep='Loop-Verify: FAIL' # 失敗した反復だけを拾う
+```
+
+コミットするのはエージェントではなくランナーです。エージェントに git を触らせると「コミットしたから完了」と
+誤認する余地が生まれるため、記録は外側で取ります。反復単位で差分が残るので `runs/*/iter-NN.md` と対応が取れ、
+巻き戻しもできます。`targetDir` が git 管理外、または `PROGRESS.md` が別リポジトリにある場合は警告して無効化します。
+（この機能は [claude-looper の評価](../docs/research/2026-09-04_claude-looper-evaluation.md) で見た
+「コミット本文の申し送り」を、エージェントの手を借りずに実現したものです。）
+
 ### チューニングの勘所
 
 - 検証が弱いとループは「テストを通すだけ」に収束する。仕様の「やってはいけないこと」を検証に落とせるなら落とす（例: `git diff --quiet -- test/` で test/ 未変更を確認）。

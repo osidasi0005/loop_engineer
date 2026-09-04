@@ -87,6 +87,8 @@ const config = {
   progressFile: './PROGRESS.md',
   runsDir: relRuns,
   verify: { command: verifyCommand, tailLines: 80, timeoutSec: 300 },
+  // true にすると反復ごとにランナーが git commit する（--commit でも有効化できる）
+  git: { autoCommit: false },
   agent: {
     command: 'claude',
     args: [
