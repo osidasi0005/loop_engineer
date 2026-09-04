@@ -1,5 +1,6 @@
 import { WORD_SEPARATOR } from './contract.mjs';
-/** 単語数を数える（暫定版） */
+/** 単語数を数える。空白だけなら 0 */
 export function wordCount(text) {
-  return text.split(WORD_SEPARATOR).length;
+  const t = text.trim();
+  return t === '' ? 0 : t.split(WORD_SEPARATOR).length;
 }
