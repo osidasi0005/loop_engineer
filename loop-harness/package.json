@@ -12,6 +12,8 @@
     "loop:mock": "node bin/loop.mjs --task slugify --agent \"node ../mock-agent.mjs\"",
     "verify": "node bin/loop.mjs --verify-only",
     "new-task": "node bin/new-task.mjs",
-    "reset:example": "node bin/reset-example.mjs"
+    "reset:example": "node bin/reset-example.mjs",
+    "wave": "node bin/wave.mjs",
+    "wave:dry": "node bin/wave.mjs --wave textkit --dry-run"
   }
 }

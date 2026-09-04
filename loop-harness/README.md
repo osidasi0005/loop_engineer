@@ -35,6 +35,7 @@ loop-harness/
 ├── package.json            npm scripts（loop / loop:mock / verify / reset:example）
 ├── bin/
 │   ├── loop.mjs            ランナー本体（Node.js、依存なし）
+│   ├── wave.mjs            複数タスクを git worktree で並列に回し、ランナーがマージと検証を行う
 │   ├── new-task.mjs        タスクの雛形を生成
 │   └── reset-example.mjs   例題タスクを初期状態に戻す
 ├── tasks/                  タスクごとに 1 フォルダ
@@ -44,12 +45,16 @@ loop-harness/
 │   │   └── PROGRESS.md       反復間の記憶（エージェントとランナーが追記）
 │   ├── 2048-01-core/       2048 のコアロジック（Opus）
 │   ├── 2048-02-cli/        2048 のターミナル UI（Sonnet、01 の成果物に依存）
-│   └── mazechase-01..04/   迷路追いかけゲーム（迷路と自機 / 敵の移動 / ゲーム進行 / UI）
+│   ├── mazechase-01..04/   迷路追いかけゲーム（迷路と自機 / 敵の移動 / ゲーム進行 / UI）
+│   ├── textkit-01..05/     wave.mjs 用: 契約 → 3 モジュール並列 → 統合 の 5 タスク
+│   └── textkit/            wave.config.json（Wave の並びと統合検証コマンド）
 ├── examples/
 │   ├── slugify/            エージェントの作業対象（src/ に実装、test/ が検証器）
 │   ├── game2048/           2 タスクで完成させたターミナル版 2048
 │   ├── mazechase/          4 タスクで完成させた迷路追いかけゲーム
-│   └── mock-agent.mjs      Claude を呼ばない偽エージェント（無料で動作確認用）
+│   ├── textkit/            wave.mjs で 3 Wave 5 タスクを並列に回して作った小さなテキスト処理ライブラリ
+│   ├── mock-agent.mjs      Claude を呼ばない偽エージェント（無料で動作確認用）
+│   └── mock-agent-textkit.mjs  textkit 専用の偽エージェント（MOCK_CONFLICT=1 でマージ衝突を再現）
 └── runs/<タスク>/<日時>/    反復ごとのログ iter-NN.md と summary.json（git 管理外）
 ```
 
@@ -244,6 +249,61 @@ git log --grep='Loop-Verify: FAIL' # 失敗した反復だけを拾う
 巻き戻しもできます。`targetDir` が git 管理外、または `PROGRESS.md` が別リポジトリにある場合は警告して無効化します。
 （この機能は [claude-looper の評価](../docs/research/2026-09-04_claude-looper-evaluation.md) で見た
 「コミット本文の申し送り」を、エージェントの手を借りずに実現したものです。）
+
+### 複数タスクを Wave で並列に回す（wave.mjs）
+
+独立したタスクが 3 つ以上あるなら、直列ではなく **Wave** 単位で並列に回せます。
+`tasks/<名前>/wave.config.json` に Wave の並びを書きます。各 Wave は既存タスク ID の配列です。
+
+```json
+{
+  "repoDir": "../../examples/textkit",
+  "runsDir": "../../runs/textkit",
+  "verify": { "command": "node --test \"test/**/*.test.mjs\"" },
+  "waves": [
+    { "name": "契約",       "tasks": ["textkit-01-contract"] },
+    { "name": "モジュール", "tasks": ["textkit-02-slugify", "textkit-03-wordcount", "textkit-04-truncate"] },
+    { "name": "統合",       "tasks": ["textkit-05-index"] }
+  ],
+  "maxParallel": 4, "maxRounds": 3, "maxCostUsd": 10
+}
+```
+
+```bash
+node bin/wave.mjs --wave textkit --dry-run
+node bin/wave.mjs --wave textkit
+```
+
+**1 Wave の流れ**（判断はすべてランナー。エージェントは worktree の中で `loop.mjs` として動くだけで、git もマージも知らない）
+
+1. 未完了タスクごとに `git worktree` とブランチ `loop/<id>` を HEAD から作り、`loop.mjs --worktree --commit` を並列起動
+2. **完了（検証 PASS + 完了宣言）したタスクだけ** を 1 つずつ現在のブランチへ `--no-ff` マージ。衝突したら abort して未完了扱い
+3. 未完了タスクは worktree の `PROGRESS.md` だけを取り込む（**コードは捨て、記憶だけ残す**）。次ラウンドは新しい HEAD から再実行
+4. マージがあれば **回帰検証**: これまでに完了した全タスクの検証コマンドを累積で実行。壊していたら停止
+5. 未完了が残れば次ラウンド（`maxRounds` まで）、無ければ次の Wave。全 Wave が終わったら **統合検証**（`verify.command`）
+
+停止条件は、全 Wave 完了 / ラウンド上限 / 累計コスト上限 / 回帰または統合検証 FAIL / worktree 作成失敗 です。
+ログは `runs/<名前>/<日時>/` に、タスクごとの `loop.mjs` のログと `wave-summary.json`、回帰・統合検証の出力が残ります。
+
+**契約先行**: Wave 1 で後続が import する定数や interface を定義し、Wave 2 以降を並列にします。
+同じファイルを触るタスクは別 Wave にします。同じ Wave に入れると衝突して 1 ラウンド無駄になります。
+
+**worktree の置き場** は既定で OS の一時ディレクトリ配下です（`worktreeBase` / `--worktree-base` で変更可）。
+リポジトリ内に置くと Windows でパスが長くなり `fatal: '$GIT_DIR' too big` で失敗します。
+
+**モックで試す**: 作業ブランチの textkit は実装済みなので、土台のコミットを別の場所にクローンして回します。
+`MOCK_CONFLICT=1` を付けると 2 タスクが同じファイルに別内容を書き、衝突 → 進捗メモだけ取り込み → 次ラウンドで再実行、の経路が見られます。
+
+```bash
+git clone --no-checkout <このリポジトリ> C:/tmp/lh && cd C:/tmp/lh && git checkout -b try <textkit 未実装のコミット>
+cd loop-harness && MOCK_CONFLICT=1 node bin/wave.mjs --wave textkit --agent "node ../mock-agent-textkit.mjs"
+```
+
+実測（2026-09-04、モック）: 3 Wave 5 タスク、Wave 2 は 3 並列、マージ 5 件、統合テスト 17 件 PASS、約 15 秒。
+衝突ありの実行では Wave 2 が 2 ラウンドになり、衝突タスクの進捗メモは専用コミットで保存された。
+
+**既知の課題**: ランナーは自分の状態を持たず git の HEAD が状態なので、途中で止めて再開すると同じタスクが再度走る。
+再実行されたタスクの進捗メモは「反復 1」から番号が振り直される（前ラウンドの記録は残る）。
 
 ### チューニングの勘所
 
