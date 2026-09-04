@@ -22,3 +22,23 @@
 
 
 - [ランナー] 反復 1: 検証 FAIL → エージェント 7 ターン / $0.3488
+
+### 反復 2
+
+**やったこと**
+- ランナーの検証結果（`node --test test/truncate.test.mjs` → PASS, 4/4）を確認
+- 完了条件を 1 つずつ照合
+  1. テスト PASS: ランナー検証で exit 0 / pass 4 / fail 0
+  2. 依存追加なし: `package.json` 自体が存在せず、実装の import は `./contract.mjs` のみ
+  3. `test/` と `src/contract.mjs` 未変更: `git status --short` が空（作業ツリーはクリーン）、`test/` は 5 ファイルとも初期のまま
+  4. JSDoc: `src/truncate.mjs` の `truncate` に説明 + `@param` ×2 + `@returns` の 5 行ブロックあり
+- 追加のコード変更はしていない（既に条件を満たしているため）
+
+**分かったこと**
+- `src/` の追加ファイルは `truncate.mjs` のみで、他タスク担当ファイル（`slugify.mjs` 等）は作っていない
+- 実装は `text.length <= max` でそのまま返し、超過時のみ `text.slice(0, max - ELLIPSIS.length) + ELLIPSIS`。テストの 4 ケース（以内・超過・既定値・ちょうど）を満たす
+
+**次にやるべきこと**
+- なし。完了条件をすべて満たしているため `COMPLETE` を宣言した
+
+- [ランナー] 反復 2: 検証 PASS → エージェント 9 ターン / $0.3781 / 完了宣言あり
