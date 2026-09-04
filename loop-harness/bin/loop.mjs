@@ -136,8 +136,26 @@ function loadConfig(path, overrides) {
   if (!existsSync(cfg.promptFile)) fail(`仕様ファイルがありません: ${cfg.promptFile}`);
   if (!existsSync(cfg.targetDir)) fail(`対象ディレクトリがありません: ${cfg.targetDir}`);
   if (overrides.worktree) remapIntoWorktree(cfg, overrides.worktree);
+  // 進捗メモが作業ディレクトリの外（wave の fix ループでは runs/ 配下）にあると、acceptEdits では書き込みが拒否されることがある。
+  // claude には --add-dir で進捗メモのディレクトリを許可する（worktree への写しの後に計算する）
+  if (isClaudeAgent(cfg.agent)) cfg.agent.args = withProgressDirAllowed(cfg.agent.args, cfg);
   cfg.runDirOverride = overrides.runDir ?? null;
   return cfg;
+}
+
+function withProgressDirAllowed(args, cfg) {
+  const dir = dirname(cfg.progressFile);
+  if (isInside(dir, cfg.targetDir)) return args;
+  const i = args.indexOf('--add-dir');
+  if (i >= 0) {
+    // 既に --add-dir があれば、その値の並び（可変長）に足す。同じディレクトリなら何もしない
+    let j = i + 1;
+    while (j < args.length && !String(args[j]).startsWith('--')) j++;
+    if (args.slice(i + 1, j).some((d) => normPath(d) === normPath(dir))) return args;
+    return [...args.slice(0, j), dir, ...args.slice(j)];
+  }
+  // --add-dir は可変長なので末尾に置く（後ろの引数を飲み込まないように）
+  return [...args, '--add-dir', dir];
 }
 
 // --worktree: 作業対象を含むリポジトリのトップレベルを worktree に差し替える。
