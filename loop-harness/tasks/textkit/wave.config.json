@@ -1,0 +1,34 @@
+{
+  "repoDir": "../../examples/textkit",
+  "runsDir": "../../runs/textkit",
+  "verify": {
+    "command": "node --test \"test/**/*.test.mjs\"",
+    "tailLines": 80,
+    "timeoutSec": 300
+  },
+  "waves": [
+    {
+      "name": "契約",
+      "tasks": [
+        "textkit-01-contract"
+      ]
+    },
+    {
+      "name": "モジュール",
+      "tasks": [
+        "textkit-02-slugify",
+        "textkit-03-wordcount",
+        "textkit-04-truncate"
+      ]
+    },
+    {
+      "name": "統合",
+      "tasks": [
+        "textkit-05-index"
+      ]
+    }
+  ],
+  "maxParallel": 4,
+  "maxRounds": 3,
+  "maxCostUsd": 10
+}

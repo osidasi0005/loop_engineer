@@ -1,0 +1,31 @@
+{
+  "repoDir": "../../examples/textkit",
+  "runsDir": "../../runs/textkit-revert",
+  "verify": {
+    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test-experiments/ellipsis.test.mjs",
+    "tailLines": 80,
+    "timeoutSec": 300
+  },
+  "regressionTasks": [
+    "textkit-01-contract",
+    "textkit-02-slugify",
+    "textkit-03-wordcount",
+    "textkit-04-truncate",
+    "textkit-05-index"
+  ],
+  "waves": [
+    {
+      "name": "変更",
+      "tasks": [
+        "textkit-06-ellipsis"
+      ]
+    }
+  ],
+  "maxParallel": 2,
+  "maxRounds": 2,
+  "maxCostUsd": 8,
+  "fix": {
+    "maxIterations": 2,
+    "maxCostUsd": 1.5
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "repoDir": "../../examples/textkit",
+  "runsDir": "../../runs/textkit-fix2",
+  "verify": {
+    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs ../textkit-rules/contract-shape.test.mjs test/slug-length.test.mjs",
+    "tailLines": 80,
+    "timeoutSec": 300
+  },
+  "regressionTasks": [
+    "textkit-01-contract",
+    "textkit-02-slugify",
+    "textkit-03-wordcount",
+    "textkit-04-truncate"
+  ],
+  "regressionCommands": [
+    "node --test test/index.test.mjs",
+    "node --test ../textkit-rules/contract-shape.test.mjs"
+  ],
+  "waves": [
+    {
+      "name": "拡張",
+      "tasks": [
+        "textkit-09-slug-length"
+      ]
+    }
+  ],
+  "maxParallel": 2,
+  "maxRounds": 2,
+  "maxCostUsd": 8,
+  "fix": {
+    "maxIterations": 2,
+    "maxCostUsd": 2
+  }
+}
