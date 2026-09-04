@@ -41,15 +41,11 @@
       "PowerShell(node *)",
       "PowerShell(npm test *)",
       "PowerShell(npm run build *)",
-      "PowerShell(npx electron *)"
+      "PowerShell(npx electron *)",
+      "Bash(npm run loop *)",
+      "Bash(npm run wave *)"
     ],
     "ask": [
-      "Bash(node bin/loop.mjs *)",
-      "Bash(node loop-harness/bin/loop.mjs *)",
-      "Bash(node bin/wave.mjs *)",
-      "Bash(node loop-harness/bin/wave.mjs *)",
-      "Bash(npm run loop *)",
-      "Bash(npm run wave *)",
       "Bash(npm install *)",
       "Bash(npm i *)",
       "Bash(npm ci *)",
