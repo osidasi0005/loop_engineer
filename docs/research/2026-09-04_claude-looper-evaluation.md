@@ -1,0 +1,99 @@
+# 評価: jujunjun110/claude-looper
+
+- 日付: 2026-09-04
+- 対象: https://github.com/jujunjun110/claude-looper （評価時点の HEAD: `4af10fd`）
+- 評価軸: loop-harness README の「ループを構成する 6 要素」
+- 方法: 全ファイル（run.sh / monitor.sh / 3 プロンプト / スラッシュコマンド / docs / git 履歴）を読解。実行はしていない
+
+## 1. 全体像
+
+Milestone × Wave 構造で、Planner → 並列 Builder → Verifier の 3 役を回す自律開発エンジン。
+bash 約 200 行のスクリプトが担うのは worktree 作成とプロセス起動のみで、判断はすべて LLM に委ねる。
+作者自身が「ブログ記事の補足資料であり汎用ライブラリではない」と明記し、Next.js / Supabase / pnpm / Vitest /
+Playwright のスタックにプロンプトと docs が強く結びついている。
+
+```
+Milestone N（直列）
+├─ Planner  … tasks が空のときだけ起動。設計ドキュメントを書き、milestones.json に tasks を追加
+└─ Wave ループ
+    ├─ Builder × 最大 8 並列 … 各タスクを git worktree に隔離、pnpm verify を通してコミット
+    └─ Verifier              … 直列マージ → 検証 → 軽微なら自分で修正 / 重ければ fix タスク追加
+```
+
+### 実運用の痕跡
+
+- git 履歴に 2026-02-26 の 15 時から 23 時までで 56 コミット。Milestone 5〜7 の plan / feat / wave verified / verified が並び、1 日で 7 マイルストーンを完走している
+- 一方で `fix(verifier)` や `verification failed` のコミットは履歴に 1 つもない。**失敗からの復帰パスが実際に動いた証拠は無い**
+- コストの実測値はリポジトリ内に存在しない
+
+## 2. 優れている点
+
+| 観点 | 内容 |
+|---|---|
+| 契約先行 Wave | W1 で interface と型のみ、W2 以降で並列実装、同一ファイルを触るタスクは別 Wave。worktree 並列の衝突問題に対する実用解 |
+| Builder のコンテキスト隔離 | Planner が「Builder が docs や既存コードを読まずに実装できる」粒度で設計ドキュメントを書く。Builder の 1 セッション入力が小さく保たれる |
+| Verifier の段階的修正権限 | 3 ファイル以内かつビジネスロジック変更なしなら自分で修正（最大 3 回）。それ以上は fix タスクとして Builder に差し戻す |
+| git を記憶バスに使う | Builder はコミット本文に「申し送り」を必須で書き、Verifier がマージ前に `git log HEAD..worktree/<id>` で読む |
+| 検証の段階制御 | W1 は検証を省略、中間 Wave は lint/typecheck/unit、Milestone 完了時のみ E2E と Playwright MCP による目視確認 |
+| 新鮮なコンテキスト | 1 タスク = 1 セッション。「前回の記憶はない」とプロンプト冒頭で宣言 |
+| 細部の配慮 | コミットのないブランチは Verifier に渡さない。タスク粒度の目安（3〜10 ファイル、単独 Wave は統合）が明文化されている |
+
+## 3. ループエンジニアリングとして弱い点
+
+6 要素との対応を先に示す。
+
+| 要素 | 評価 | 根拠 |
+|---|---|---|
+| 1. 新鮮なコンテキスト | ○ | 1 タスク 1 セッション |
+| 2. 外部検証器が真実 | **×** | run.sh は検証コマンドを一度も実行しない |
+| 3. 反復間の記憶 | ○ | 設計ドキュメント + milestones.json + 申し送りコミット |
+| 4. 停止条件 | △ | 総 50 ラウンドの上限のみ。予算・スタック・タイムアウト後の復旧なし |
+| 5. スタック検知とエスカレーション | **×** | 同一失敗の検知なし。人へ返すのは 50 ラウンド到達時の die のみ |
+| 6. 可観測性 | △ | stream-json ログと monitor.sh はあるが、/tmp 配下で揮発し横断集計もない |
+
+### 個別の問題
+
+1. **ランナーが検証しない。** run.sh は Verifier が milestones.json に書いた `done` だけを見て進む。gen-milestones が定義する `verification` フィールドは run.sh のどこからも参照されない死んだ項目。「AI の『できました』を信じない」がランナー層で破られている。
+2. **停止条件が回数上限だけ。** `MAX_ROUNDS=50` は全 Milestone 合計。stream-json の `total_cost_usd` を集計していないため予算停止がない。Verifier の「自己修正 3 回まで」はプロンプト上の依頼で強制されない。
+3. **暴走経路。** ある Wave の全 Builder がコミットを残せなかった場合、Verifier をスキップ（`continue`）して同じ Wave を同じタスクで再実行する。上限は 50 ラウンド × 最大 8 並列 × 30 分の Opus セッション。fix タスクが繰り返し追加される場合も同様に同一失敗の検知がない。
+4. **README とスクリプトの矛盾。** Verifier プロンプトは「マージ失敗ブランチは残して次ラウンドで再試行」と指示するが、run.sh は各バッチ開始時に `git branch -D worktree/<id>` して HEAD から作り直す。失敗ブランチの作業は必ず捨てられる。
+5. **障害復旧なし。** Verifier が 30 分のタイムアウトでマージ途中に切られると、本体チェックアウトが競合状態のまま残り、次ラウンドはその上で走る。クリーン状態の確認は起動時の 1 回だけ。
+6. **安全性・移植性の割り切り。** 全エージェントが `--dangerously-skip-permissions`。Verifier はポート 3000 のプロセスを `kill -9` する。`caffeinate` と `stat -f` は macOS 専用、`timeout` は GNU coreutils が別途必要。
+
+## 4. loop-harness との比較
+
+| | loop-harness | claude-looper |
+|---|---|---|
+| 単位 | 1 タスクを直列反復 | Milestone 内で最大 8 タスク並列 |
+| 分割 | 人手（PROMPT.md をタスクごとに書く） | Planner が自動分割 |
+| 真実の源 | ランナーが検証コマンドを毎反復実行 | Verifier エージェントの自己申告 |
+| 停止条件 | 完了 / 回数 / 予算 / スタック / エラー | 回数のみ |
+| 記憶 | PROGRESS.md | 設計ドキュメント + milestones.json + 申し送りコミット |
+| ログ | runs/<task>/<日時>/iter-NN.md + summary.json（git 管理外だが永続） | /tmp/ralph-logs の stream-json（揮発） |
+| 到達規模 | 関数〜小さなゲーム（実測あり） | Next.js アプリ 7 マイルストーン（実測なし） |
+| 権限 | allowedTools と max-turns で制限 | 制限なし |
+
+両者は補完関係にある。loop-harness は信頼と停止をランナーで強制する代わりに分割が人手で直列。
+claude-looper は分割と並列化を LLM に任せて実アプリ規模に届く代わりに、信頼と停止を LLM に預けている。
+
+## 5. 取り込む候補
+
+### loop-harness に取り込む価値があるもの
+
+- Planner が書く設計ドキュメントの形式（作成ファイル / 型シグネチャ / import 先 / 実装パターン / 注意事項）
+- 契約先行 Wave の規則。複数タスクを worktree 並列で回す実験の設計原理になる
+- Verifier の段階的修正権限と fix タスクによる差し戻し
+- コミット本文の申し送りを PROGRESS.md と併用する案
+
+### claude-looper に欠けていて loop-harness が既に持つもの
+
+- done フラグを受け入れる前にランナーが `verification` コマンドを実行して門番をする
+- stream-json の `total_cost_usd` を集計した予算停止
+- 検証出力のハッシュによる同一失敗の検知と警告
+- コミットなし Wave の再実行を停止条件にする
+
+## 6. 研究テーマ候補
+
+1. **Verifier の判断をランナーの機械的検証でどこまで置き換えられるか。** 検証コマンド門番を入れた場合と入れない場合で、誤完了率と追加コストを比較する
+2. **Planner の分割精度が並列時の衝突率と再実行回数にどう影響するか。** 契約先行 Wave の規則の有無、タスク粒度の目安の有無で比較する
+3. **申し送りコミットと PROGRESS.md の引き継ぎ精度比較。** 同じ多タスク題材で、記憶方式だけを変える
