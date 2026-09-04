@@ -192,6 +192,9 @@ node examples/game2048/src/cli.mjs
   ラッパーになるので、コード署名証明書が無い限り使えない。この対処は環境の問題なので人間が行い、テストと仕様に反映した
 - ポータブル exe（NSIS のラッパー）は子プロセスの stdout を返さない。exe の検証は「ファイルへの書き出し」も仕様に含めた
 
+この開発で見つかった loop-harness 自体の改善点（確認だけの反復を減らす、内側のエージェントに git を渡さない、など 7 件）は
+[docs/research/2026-09-04_game2048-desktop-loop-improvements.md](../docs/research/2026-09-04_game2048-desktop-loop-improvements.md) にまとめた。
+
 **ビルドして遊ぶ**（初回の `npm install` は Electron 本体約 120MB をダウンロードする）:
 
 ```bash
