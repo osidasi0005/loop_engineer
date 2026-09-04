@@ -61,3 +61,17 @@
 - ネットワークアクセス（electron-builder が自動で行うキャッシュ確認は除く）
 - `dist/` をコミット対象にする
 - `%APPDATA%` の実ファイルへ書く（動作確認は必ず `--user-data` に一時ディレクトリを渡す）
+
+## 追記（2026-09-04 夜、人間による環境変更）
+
+このタスクの完了後、同じ PC の Smart App Control（未署名アプリの実行制限）が有効になり、
+electron-builder が exe のリソースを書き換えた時点で Electron の署名が壊れ、`dist/2048.exe`（ポータブル）も
+`dist/win-unpacked/2048.exe` も起動時にブロックされるようになった（コード整合性イベント 3077）。
+
+対処として人間が次を変更した。テスト `test/build.test.mjs` も同じ内容に更新済み。
+
+- `build.disableAsarIntegrity: true` — exe を一切書き換えず、Electron の署名済みバイナリのまま使う（SHA-256 が一致することをテストで確認）
+- `win.target` を `dir` + `zip` に変更（ポータブル形式は NSIS の自己展開 exe が未署名になるため不可）
+- `win.artifactName` を `2048-win-x64.${ext}` に、`scripts.build` を `electron-builder --win` に変更
+
+配布物は `dist/win-unpacked/`（フォルダごと）と `dist/2048-win-x64.zip`。起動は `dist/win-unpacked/2048.exe`。

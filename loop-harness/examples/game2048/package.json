@@ -8,7 +8,7 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "start": "electron .",
-    "build": "electron-builder --win portable"
+    "build": "electron-builder --win"
   },
   "devDependencies": {
     "electron": "^44.2.0",
@@ -17,13 +17,36 @@
   "build": {
     "appId": "jp.osidasi.game2048",
     "productName": "2048",
-    "directories": { "output": "dist" },
-    "files": ["app/**/*", "src/**/*", "package.json"],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "app/**/*",
+      "src/**/*",
+      "package.json"
+    ],
     "win": {
-      "target": [{ "target": "portable", "arch": ["x64"] }],
-      "artifactName": "2048.exe",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "2048-win-x64.${ext}",
       "signAndEditExecutable": false
     },
-    "electronLanguages": ["en-US", "ja"]
+    "electronLanguages": [
+      "en-US",
+      "ja"
+    ],
+    "disableAsarIntegrity": true
   }
 }
