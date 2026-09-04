@@ -232,6 +232,8 @@ wave ランナーの spec-issue 集約（項目 5）の本物での確認: `text
 
 本物の Claude での確認はしていない（次に wave を回したとき、fix の `PROGRESS.md` にエージェントの反復ブロックが入るかを見る）
 
-モック wave の確認で分かったこと: `examples/textkit` の `test/index.test.mjs` は後のタスク（09 slug-length）の期待を含むようになったので、
-未実装の textkit からモックで回すと 05-index がスタックする（モックの `index.mjs` が古い）。実装済みの textkit で回す `npm run wave` は
-「完了だがコミットなし」の経路を通るので影響しない。モックを更新するか、未実装用のコミットを別に持つかは未定
+モック wave の確認で分かったこと: 05-index の検証は `test/**/*.test.mjs` 全体で、後のタスク（09 slug-length）が足した
+`test/slug-length.test.mjs`（50 文字で切り詰め）を含む。モックの slugify（02）にはその切り詰めが無かったので、未実装の textkit から
+モックで回すと 05-index がスタックした（当初「モックの `index.mjs` が古い」と書いたが、古かったのは slugify）。
+モックの slugify に 50 文字の切り詰めを足して解消（同日）。実装済みの textkit で回す `npm run wave` は「完了だがコミットなし」の経路を通るので、
+この件の影響は元々無い
