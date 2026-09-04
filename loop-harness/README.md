@@ -192,13 +192,17 @@ node examples/game2048/src/cli.mjs
   ラッパーになるので、コード署名証明書が無い限り使えない。この対処は環境の問題なので人間が行い、テストと仕様に反映した
 - ポータブル exe（NSIS のラッパー）は子プロセスの stdout を返さない。exe の検証は「ファイルへの書き出し」も仕様に含めた
 
-遊ぶには（`npm run build` の後）:
+**ビルドして遊ぶ**（初回の `npm install` は Electron 本体約 120MB をダウンロードする）:
 
 ```bash
-examples/game2048/dist/win-unpacked/2048.exe
+cd examples/game2048
+npm install
+npm run build
+dist/win-unpacked/2048.exe
 ```
 
-配布するときは `dist/2048-win-x64.zip` を渡し、展開したフォルダの `2048.exe` を起動してもらいます。
+`dist/` は git 管理外です。配布するときは `dist/2048-win-x64.zip` を渡し、展開したフォルダの `2048.exe` を起動してもらいます。
+ビルド不要で試すなら `npm start`。操作・設定ファイル・テストの詳細は [examples/game2048/README.md](examples/game2048/README.md)。
 
 盤面の幅は `%APPDATA%\2048\settings.json` の `size`（既定 600、300〜1200）で変えられます。
 
