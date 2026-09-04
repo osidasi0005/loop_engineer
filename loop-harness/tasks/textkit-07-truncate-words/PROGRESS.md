@@ -79,3 +79,80 @@ test at test\index.test.mjs:11:1
     diff: 'simple'
   }
 ```
+
+### 反復 1（ラウンド 2）
+
+やったこと
+- 差し戻しにより `src/truncate.mjs` が元の文字数切り実装に戻っていたことを確認（検証 FAIL の actual `'Hello Wonde…'` / `'Hello Wonderful …'` は素の `slice(0, max - ELLIPSIS.length)` の出力）。単語境界切りを実装し直した。
+- 実装: `WORD_SEPARATOR.source` から `g` 付き RegExp を作り、`exec` ループで開始 index が `limit = max - ELLIPSIS.length` 以下の最後の区切りを探して、その直前で `slice`。区切りが無い／先頭のみの場合は `limit` 文字で切るフォールバック。
+- 変更ファイルは `src/truncate.mjs` の 1 つだけ（`git status --short` で確認）。`src/contract.mjs`・`test/`・他タスク担当ファイルは未変更、依存追加なし。
+- 検証: `node --test test/truncate-words.test.mjs` → 3 pass / 0 fail。既存の `test/truncate.test.mjs` も 4 pass / 0 fail。
+
+分かったこと
+- ラウンド 1 の差し戻し理由（マージ後の `test/index.test.mjs` FAIL）は、本タスクの仕様と `test/index.test.mjs` の期待値が両立しないことによる。`summarize` は `truncate(text)`（max=20 → limit=19）を呼び、入力 `'Hello Wonderful World of Text Processing'` の区切り開始位置は 5 / 15 / 21 なので、単語境界で切れば必ず `'Hello Wonderful…'` になる。期待値 `'Hello Wonderful Wor…'` は旧仕様（文字数切り）でしか作れない。
+- `test/ellipsis.test.mjs`（タスク 06: `ELLIPSIS` を `'...'` にする）も `test/index.test.mjs` の `'…'` 期待値と衝突する。つまり `index.test.mjs` は拡張タスク 06・07 のどちらを入れても FAIL する共通の回帰トラップで、本タスク側の実装ミスや契約の書き換えが原因ではない。
+- 契約・他タスクのファイルには触れていないため、差し戻しの再発を本タスク単独で防ぐ手段はない（`test/` は本タスクでは変更禁止）。
+
+次にやるべきこと
+- ランナーの検証（`node --test test/truncate-words.test.mjs`）の結果を待つ。
+- 統合／回帰検証で `test/index.test.mjs` が再び FAIL した場合は本タスクの範囲外。統合側で `title` の期待値を新仕様（タスク 07 のみなら `'Hello Wonderful…'`、タスク 06 も入るなら ELLIPSIS 変更後の値）に更新する扱いにする。
+
+- [ランナー] 反復 1: 検証 FAIL → エージェント 18 ターン / $0.8628
+
+### 反復 2（ラウンド 2）
+
+やったこと
+- コード変更なし。反復 1（ラウンド 2）の実装がランナー検証 PASS だったため、完了条件を 1 つずつ照合した。
+  1. `node --test test/truncate-words.test.mjs` → 3 tests / 3 pass（自分でも再実行して確認）。
+  2. 依存追加なし: `examples/textkit` に `package.json` が無く、コミット差分にも依存関係の変更なし。
+  3. `test/` と `src/contract.mjs` 未変更: `git show --stat 3528f47` の変更ファイルは `src/truncate.mjs` と本 PROGRESS.md の 2 つのみ。作業ツリーは clean。
+  4. JSDoc: `truncate` に説明 2 行 + `@param` × 2 + `@returns` あり（説明部は 1〜3 行の範囲内、既存 `slugify` と同形式）。
+- 差し戻し対策の確認: 他タスク担当ファイル・共有契約（`src/contract.mjs`）は今回も未変更であることを差分で確認した。
+- 本 PROGRESS.md に反復 2 のブロックを追記した。
+
+分かったこと
+- 実装は `src/truncate.mjs` 1 ファイル・13 行の差分に収まっており、元の構造（早期 return → 切る位置決定 → `slice + ELLIPSIS`）を保ったまま切る位置の決め方だけを変える形になっている。仕様の実装パターン指示に合致。
+- ラウンド 1 の差し戻し原因（`test/index.test.mjs` の `title: 'Hello Wonderful Wor…'`）は旧仕様（文字数切り）前提の期待値であり、本タスクの仕様と論理的に両立しない。本タスクは `test/` 変更禁止なので、この回帰は統合側で期待値を更新する以外に解消手段がない。
+- ランナーの PROGRESS.md 行に記録される検証結果と、次反復の入力に渡る「直前の検証結果」がずれる場合がある（ラウンド 1 でも同様の食い違いがあった）。判断は入力側の検証結果に従った。
+
+次にやるべきこと
+- なし。完了条件をすべて満たしたので完了宣言する。
+- 統合時の申し送り: `test/index.test.mjs` の `summarize` 期待値 `title` を新仕様に更新する必要がある（タスク 07 のみ適用なら `'Hello Wonderful…'`、タスク 06 の `ELLIPSIS = '...'` も入るなら `'Hello Wonderful...'`）。これを行わないと回帰検証で再び差し戻される。
+
+- [ランナー] 反復 2: 検証 PASS → エージェント 7 ターン / $0.4071 / 完了宣言あり
+
+### ランナー: ラウンド 2 のマージは回帰検証で差し戻し
+マージ後に `node --test "test/**/*.test.mjs"` が失敗した（fix ループでも直らなかった）。マージは取り消され、コードは破棄された。
+次の実行では、他のタスクが担当するファイルや契約（共有定数・interface）を変更していないかを最初に確認すること。
+```
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at test\index.test.mjs:11:1
+✖ summarize は 1 行の見出しを返す: slug / 単語数 / 切り詰め (4.3722ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    {
+      slug: 'hello-wonderful-world-of-text-processing',
+  +   title: 'Hello Wonderful…',
+  -   title: 'Hello Wonderful Wor…',
+      words: 6
+    }
+  
+      at TestContext.<anonymous> (file:///C:/AI_loop_engineer/.claude/worktrees/loop-engineering-research-ca0385/loop-harness/examples/textkit/test/index.test.mjs:12:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1325:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)
+      at Test.postRun (node:internal/test_runner/test:1465:19)
+      at Test.run (node:internal/test_runner/test:1390:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: { slug: 'hello-wonderful-world-of-text-processing', words: 6, title: 'Hello Wonderful…' },
+    expected: { slug: 'hello-wonderful-world-of-text-processing', words: 6, title: 'Hello Wonderful Wor…' },
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+```
