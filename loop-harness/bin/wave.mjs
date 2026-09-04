@@ -98,8 +98,11 @@ function loadConfig(path, overrides) {
     maxCostUsd: 1,
     allowedTools: 'Read,Edit,Glob,Grep,Bash(node:*),PowerShell(node:*)',
     maxTurns: 20,
+    protectedPaths: ['test'], // repoDir からの相対。fix がここを変えたら「テストを弱めて通した」とみなし無効にする
     ...cfg.fix,
   };
+  // この wave の実行前から完了しているタスク。回帰検証にその検証コマンドを含める（既存コードの上に拡張を載せるとき）
+  cfg.regressionTasks = cfg.regressionTasks ?? [];
   if (typeof overrides.fixEnabled === 'boolean') cfg.fix.enabled = overrides.fixEnabled;
   // worktree の置き場。リポジトリ内の runs/ に置くと Windows でパスが長くなり
   // 「fatal: '$GIT_DIR' too big」で作成に失敗することがあるため、既定は OS の一時ディレクトリ
@@ -116,6 +119,9 @@ function loadConfig(path, overrides) {
       if (!existsSync(join(tasksDir, id, 'loop.config.json'))) fail(`Wave "${w.name}" のタスクがありません: tasks/${id}/loop.config.json`);
     }
   });
+  for (const id of cfg.regressionTasks) {
+    if (!existsSync(join(tasksDir, id, 'loop.config.json'))) fail(`regressionTasks のタスクがありません: tasks/${id}/loop.config.json`);
+  }
   return cfg;
 }
 
@@ -337,7 +343,14 @@ async function main() {
   // 完了済みタスクの検証コマンドを累積した回帰検証
   const regressionCommands = (wave, extraIds = []) => {
     const done = state.waves.flatMap((w) => Object.entries(w.done).filter(([, d]) => d).map(([id]) => id));
-    return wave.verify ? [wave.verify] : [...new Set([...done, ...extraIds].map(taskVerifyCommand).filter(Boolean))];
+    return wave.verify ? [wave.verify] : [...new Set([...cfg.regressionTasks, ...done, ...extraIds].map(taskVerifyCommand).filter(Boolean))];
+  };
+  // fix が保護パス（既定 test/）を変更していないか。変更していたら「テストを弱めて通した」とみなす
+  const fixTouchedProtected = () => {
+    const paths = cfg.fix.protectedPaths.map((p) => join(cfg.repoDir, p)).filter((p) => existsSync(p));
+    if (paths.length === 0) return null;
+    const changed = git(['status', '--porcelain', '--', ...paths], toplevel).stdout;
+    return changed || null;
   };
   // 回帰・統合検証が落ちたときの第 1 段: fix ループを回し、もう一度同じ検証で判定する
   const tryFix = ({ label, title, situation, commands, failed, baseTaskId }) => {
@@ -345,11 +358,16 @@ async function main() {
     log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで）→ ${dir}`);
     const fx = runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, agent: args.agent });
     state.totalCostUsd += fx.costUsd;
-    const again = runCommands(commands, cfg);
-    writeFileSync(join(dir, 'recheck.txt'), formatResults(again.results));
-    const record = { label, fixStatus: fx.status, iterations: fx.iterations, costUsd: fx.costUsd, recheckOk: again.ok };
+    const protectedChanged = fixTouchedProtected();
+    let again = runCommands(commands, cfg);
+    writeFileSync(join(dir, 'recheck.txt'), (protectedChanged ? `保護パスが変更された:\n${protectedChanged}\n\n` : '') + formatResults(again.results));
+    if (protectedChanged) {
+      // テストを弱めて通した可能性があるので、検証結果にかかわらず fix は無効
+      again = { ...again, ok: false, failed: again.failed ?? { command: '(保護パスの変更)', output: protectedChanged } };
+    }
+    const record = { label, fixStatus: fx.status, iterations: fx.iterations, costUsd: fx.costUsd, recheckOk: again.ok, protectedChanged: Boolean(protectedChanged) };
     state.fixes.push(record);
-    log(`  fix ループ ${fx.status}（${fx.iterations} 反復、$${fx.costUsd.toFixed(4)}）→ 再検証 ${again.ok ? 'PASS' : 'FAIL'}`);
+    log(`  fix ループ ${fx.status}（${fx.iterations} 反復、$${fx.costUsd.toFixed(4)}）→ 再検証 ${again.ok ? 'PASS' : 'FAIL'}${protectedChanged ? '（保護パス test/ を変更したため無効）' : ''}`);
     return { ok: again.ok, record, again };
   };
 
