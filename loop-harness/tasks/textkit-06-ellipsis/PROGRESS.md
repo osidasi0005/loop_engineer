@@ -75,3 +75,25 @@ $ node --test "test/**/*.test.mjs"
     diff: 'simple'
   }
 ```
+
+### 反復 1（差し戻し後の再実行）
+- やったこと: コードは変更していない。前回のランナー指示どおり、まず共有契約 `ELLIPSIS` と変更禁止の `test/` の関係を調べ、
+  この仕様が実現不可能であることを確認した。`<blocked>` で人間の判断に返す。
+- 分かったこと:
+  - 現状（`ELLIPSIS = '…'`）で `node --test "test/**/*.test.mjs"` は 20 pass / 0 fail。
+  - `ELLIPSIS` を `'...'` にすると、変更禁止の `test/` が必ず 3 件 FAIL する。回避手段は存在しない:
+    - `test/contract.test.mjs:6` … `assert.equal(ELLIPSIS, '…')` とリテラルで固定。`'...'` とは両立しない。
+    - `test/index.test.mjs:11` … `title: 'Hello Wonderful Wor…'` とリテラルで固定。
+    - `test/truncate.test.mjs:7` … `truncate('abcdefghij', 5)` を `'abcd' + ELLIPSIS` と比較。
+      3 文字の省略記号だと実装は `'ab...'`（5 文字）を返すが、期待値は `'abcd...'`（7 文字）になり矛盾する。
+      この期待値は「省略記号は 1 文字」という前提が式に埋め込まれており、`ELLIPSIS` を参照していても長さ変更に追随しない。
+  - 上の 3 件はランナーがラウンド 1 のマージ後に記録した失敗（`'...' !== '…'` / `'ab...' !== 'abcd...'`）と完全に一致する。
+    つまり fix ループでも直らなかった原因はこれで、実装側（`src/contract.mjs` のみ変更可）では解消できない。
+  - 仕様の完了条件 1（`test-experiments/ellipsis.test.mjs` を PASS）と完了条件 3（`test/` を変更しない）は同時には満たせない。
+    前回はマージまで進んだが回帰検証で差し戻されたので、同じ変更を再投入しても結果は変わらない。
+- 次にやるべきこと: 人間の判断待ち。決着させるには次のどれかが必要:
+  1. `test/contract.test.mjs` / `test/index.test.mjs` / `test/truncate.test.mjs` の更新を仕様で許可する、
+  2. `ELLIPSIS` を変えず `truncate` 側に別の指定（引数やオプション）で ASCII 省略記号を渡す設計にする、
+  3. このタスク自体を取り下げる。
+
+- [ランナー] 反復 1: 検証 FAIL → エージェント 10 ターン / $0.6849
