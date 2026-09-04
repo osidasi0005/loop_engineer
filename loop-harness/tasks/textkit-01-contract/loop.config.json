@@ -28,7 +28,7 @@
   },
   "loop": {
     "maxIterations": 6,
-    "maxCostUsd": 2,
+    "maxCostUsd": 4,
     "stuckWarnAfter": 2,
     "stuckStopAfter": 4,
     "doneMarker": "<promise>COMPLETE</promise>"
