@@ -25,6 +25,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -50,6 +51,7 @@ function parseArgs(argv) {
     else if (a === '--agent') out.agent = next();
     else if (a === '--max-rounds') out.overrides.maxRounds = Number(next());
     else if (a === '--budget') out.overrides.maxCostUsd = Number(next());
+    else if (a === '--worktree-base') out.overrides.worktreeBase = resolve(next());
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--keep-worktrees') out.keepWorktrees = true;
     else if (a === '--help' || a === '-h') out.help = true;
@@ -65,6 +67,7 @@ function usage() {
   --agent "<cmd>"     各タスクの loop.mjs に渡すエージェント起動コマンド（例: "node ../mock-agent-textkit.mjs"）
   --max-rounds <N>    1 Wave あたりの最大ラウンド数を上書き
   --budget <USD>      全タスク合計のコスト上限を上書き
+  --worktree-base <dir>  worktree を作る場所（既定: OS の一時ディレクトリ/loop-harness-wt。Windows のパス長制限を避けるため短い場所にする）
   --dry-run           実行計画だけ表示して終了
   --keep-worktrees    終了後も worktree とブランチを残す（調査用）
 `);
@@ -83,6 +86,9 @@ function loadConfig(path, overrides) {
   cfg.maxParallel = cfg.maxParallel ?? 4;
   cfg.maxRounds = cfg.maxRounds ?? 3;
   cfg.maxCostUsd = cfg.maxCostUsd ?? 10;
+  // worktree の置き場。リポジトリ内の runs/ に置くと Windows でパスが長くなり
+  // 「fatal: '$GIT_DIR' too big」で作成に失敗することがあるため、既定は OS の一時ディレクトリ
+  cfg.worktreeBase = overrides.worktreeBase ?? (cfg.worktreeBase ? abs(cfg.worktreeBase) : join(tmpdir(), 'loop-harness-wt'));
   if (Number.isFinite(overrides.maxRounds)) cfg.maxRounds = overrides.maxRounds;
   if (Number.isFinite(overrides.maxCostUsd)) cfg.maxCostUsd = overrides.maxCostUsd;
   if (!Array.isArray(cfg.waves) || cfg.waves.length === 0) fail('waves が空です');
@@ -194,17 +200,21 @@ async function main() {
   const dirty = git(['status', '--porcelain'], toplevel).stdout;
   if (dirty && !args.dryRun) fail(`作業ツリーがクリーンではありません。先にコミットするか戻してください:\n${tail(dirty, 10)}`);
 
-  console.log(`[wave] ${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算$${cfg.maxCostUsd}`);
+  const log = (msg) => console.log(`[wave] ${msg}`);
+  log(`${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算$${cfg.maxCostUsd}`);
   cfg.waves.forEach((w, i) => console.log(`  Wave ${i + 1} ${w.name}: ${w.tasks.join(', ')}`));
   if (args.dryRun) return console.log('[wave] ドライラン終了');
 
-  const runDir = join(cfg.runsDir, nowStamp());
-  const wtBase = join(runDir, 'wt');
+  const stamp = nowStamp();
+  const runDir = join(cfg.runsDir, stamp);
+  mkdirSync(runDir, { recursive: true });
+  // worktree は短いパスに置く（日時の秒以下を落として短くする）
+  const wtBase = join(cfg.worktreeBase, `${cfg.name}-${stamp.slice(0, 16).replace(/\D/g, '')}`);
   mkdirSync(wtBase, { recursive: true });
+  log(`worktree=${wtBase}`);
   const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [] };
   const summaryPath = join(runDir, 'wave-summary.json');
   const save = () => writeFileSync(summaryPath, JSON.stringify(state, null, 2));
-  const log = (msg) => console.log(`[wave] ${msg}`);
 
   const cleanup = (id, worktree) => {
     if (args.keepWorktrees) return;
@@ -232,9 +242,13 @@ async function main() {
         git(['branch', '-D', `loop/${id}`], toplevel);
         const r = git(['worktree', 'add', '-b', `loop/${id}`, worktree, 'HEAD'], toplevel);
         if (r.code !== 0) {
+          // worktree が作れないのは環境の問題（パス長・権限など）で、再試行しても直らない。即停止する
           roundState.tasks[id] = { status: 'worktree_failed', detail: r.stderr };
-          log(`  ${id}: worktree 作成失敗 ${r.stderr}`);
-          continue;
+          state.status = 'worktree_failed';
+          state.failedAt = { wave: wave.name, round, id, detail: r.stderr };
+          log(`  ${id}: worktree 作成失敗。停止します\n${r.stderr}`);
+          save();
+          break outer;
         }
         const taskRunDir = join(runDir, `${id}-r${round}`);
         mkdirSync(taskRunDir, { recursive: true });
@@ -367,6 +381,7 @@ async function main() {
     integration_failed: '統合検証 FAIL（全 Wave 終了後の全体テストが落ちた）',
     budget_exceeded: '予算超過',
     max_rounds: 'ラウンド上限（未完了タスクあり）',
+    worktree_failed: 'worktree 作成失敗（環境の問題。--worktree-base で短いパスを指定するなど）',
   }[state.status];
   log(`終了: ${label}  マージ${state.merges.length}件  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
