@@ -482,6 +482,8 @@ node bin/wave.mjs --wave textkit --dry-run
 node bin/wave.mjs --wave textkit
 ```
 
+主なオプション: `--max-rounds N` / `--budget USD` / `--no-fix` / `--parallel N`（同時に回すタスク数）/ `--priority below-normal|low`（OS 優先度。後述）/ `--keep-worktrees`。
+
 **1 Wave の流れ**（判断はすべてランナー。エージェントは worktree の中で `loop.mjs` として動くだけで、git もマージも知らない）
 
 1. 未完了タスクごとに `git worktree` とブランチ `loop/<id>` を HEAD から作り、`loop.mjs --worktree --commit` を並列起動
@@ -596,6 +598,27 @@ wave が「ラウンド上限」ではなく「タスクが『自分では直せ
 詳細な経緯は [docs/research/2026-09-04_impl-log.md](../docs/research/2026-09-04_impl-log.md)、
 比較元の評価は [docs/research/2026-09-04_claude-looper-evaluation.md](../docs/research/2026-09-04_claude-looper-evaluation.md) にあります。
 
+### PC の負荷を抑える（--parallel と --priority）
+
+ランナー自身は軽いが、内側の `claude -p`・`node --test`・Electron が並列数ぶん同時に走ると PC 全体が重くなる。
+手段は 2 つで、どちらもコマンドラインか設定ファイル（`maxParallel` / `priority`）で指定できる。
+
+```bash
+# 同時に回すタスクを 1 つに絞り、OS 優先度を下げる（他の作業を優先させたいとき）
+node bin/wave.mjs --wave textkit --parallel 1 --priority below-normal
+# 単発のループも同じ
+node bin/loop.mjs --task slugify --priority low
+```
+
+| 手段 | 効き方 | 代償 |
+|---|---|---|
+| `--parallel N`（wave の `maxParallel`） | 同時に起動する `loop.mjs` を N 本に絞る。CPU のピークが下がる | Wave の所要が最も遅いタスクの合計に近づく。結果（反復数・費用）は変わらない |
+| `--priority below-normal` / `low` | ランナーの OS 優先度を下げる。子プロセス（`loop.mjs`、エージェント、検証コマンド）が引き継ぐので、エディタやブラウザが引っかかりにくくなる | CPU の総使用量は減らない。`low`（Windows の IDLE クラス / nice 19）は他が空いているときだけ CPU を使うので、PC を使い続けていると遅くなる |
+
+優先度は `normal`（既定）/ `below-normal` / `low` の 3 段階。`wave.mjs` は各タスクと fix の `loop.mjs` にも `--priority` を渡し、`[loop] OS 優先度: low` とログに出す。
+確認: 偽エージェントに `os.getPriority()` を報告させると、`normal` / `below-normal` / `low` でそれぞれ 0 / 10 / 19 が返る（Windows 11、Node 24）。
+未実装の textkit に `--parallel 1 --priority low` でモック wave を回すと、Wave 2 の 3 タスクが 1 つずつ順に起動・完了し、5 本の `loop.mjs` すべてが `low` で走った。
+
 ### チューニングの勘所
 
 - 検証が弱いとループは「テストを通すだけ」に収束する。仕様の「やってはいけないこと」を検証に落とせるなら落とす（例: `git diff --quiet -- test/` で test/ 未変更を確認）。
@@ -604,6 +627,7 @@ wave が「ラウンド上限」ではなく「タスクが『自分では直せ
 - Windows でエージェントに PowerShell を使わせる場合、`--allowedTools` に `PowerShell(node:*)` のように別途許可が必要（Bash の許可は PowerShell ツールに効かない）。
 - プロジェクトの `.claude/settings.json` の許可リストは内側のエージェントにも効く。書き系コマンドを足すときは、内側に渡っても問題ないか考える（git はランナーが常に禁止する）。
 - UI の仕様は「クラス名」ではなく「計算済みの色と寸法」で書き、テストもそこを見る。外部プロセスを起動するテストは、起動前に成果物の存在を `assert` する。
+- 本物で回して PC が重いなら、まず `--parallel 1〜2`。それでも他の作業が引っかかるなら `--priority below-normal`。結果は変わらないので、実測の比較には影響しない。
 - 同じ失敗が続く原因が環境（依存・権限・ネットワーク・外部ツール）にあるなら、ループでは直らない。`setup.command` に手順を残し、人間が直してから再実行する。
 - `runs/*/iter-NN.md` を読み返して「エージェントが何を見て判断したか」を確認し、仕様・検証・プロンプト文面を直す。この改善サイクル自体がループエンジニアリングです。
   終了時に列挙される「仕様への指摘」（`<spec-issue>`）はその入口になる。

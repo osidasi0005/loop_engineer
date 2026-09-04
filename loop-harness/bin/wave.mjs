@@ -23,6 +23,7 @@
 //   途中は完了済みタスクの検証だけを回帰させ、全体のテストは最後にだけ回す（1 回目の試行で学んだ）。
 //
 // 使い方:  node bin/wave.mjs --wave <名前> [--agent "<cmd>"] [--max-rounds N] [--budget USD]
+//                            [--parallel N] [--priority normal|below-normal|low]
 //                            [--worktree-base <dir>] [--no-fix] [--dry-run] [--keep-worktrees]
 //
 // Wave は tasks/<名前>/wave.config.json で定義する。
@@ -33,6 +34,7 @@ import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { groupSpecIssues, printSpecIssues, oneLine } from './lib/spec-issues.mjs';
+import { applyPriority, normalizePriority, PRIORITY_NAMES } from './lib/priority.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -58,6 +60,8 @@ function parseArgs(argv) {
     else if (a === '--agent') out.agent = next();
     else if (a === '--max-rounds') out.overrides.maxRounds = Number(next());
     else if (a === '--budget') out.overrides.maxCostUsd = Number(next());
+    else if (a === '--parallel') out.overrides.maxParallel = Number(next());
+    else if (a === '--priority') out.overrides.priority = next();
     else if (a === '--worktree-base') out.overrides.worktreeBase = resolve(next());
     else if (a === '--no-fix') out.overrides.fixEnabled = false;
     else if (a === '--dry-run') out.dryRun = true;
@@ -75,6 +79,9 @@ function usage() {
   --agent "<cmd>"     各タスクの loop.mjs に渡すエージェント起動コマンド（例: "node ../mock-agent-textkit.mjs"）
   --max-rounds <N>    1 Wave あたりの最大ラウンド数を上書き
   --budget <USD>      全タスク合計のコスト上限を上書き
+  --parallel <N>      同時に回すタスク数を上書き（設定の maxParallel。CPU が逼迫するなら 1〜2 に下げる）
+  --priority <lvl>    ランナーと内側の loop.mjs・エージェント・検証の OS 優先度（normal / below-normal / low。既定 normal）
+                      PC の他の作業を優先させたいときに下げる。設定の priority を上書きする
   --worktree-base <dir>  worktree を作る場所（既定: OS の一時ディレクトリ/loop-harness-wt。Windows のパス長制限を避けるため短い場所にする）
   --no-fix            回帰・統合検証が落ちたときの fix ループを使わない（すぐ差し戻す / 失敗終了）
   --dry-run           実行計画だけ表示して終了
@@ -114,6 +121,12 @@ function loadConfig(path, overrides) {
   // 「fatal: '$GIT_DIR' too big」で作成に失敗することがあるため、既定は OS の一時ディレクトリ
   cfg.worktreeBase = overrides.worktreeBase ?? (cfg.worktreeBase ? abs(cfg.worktreeBase) : join(tmpdir(), 'loop-harness-wt'));
   if (Number.isFinite(overrides.maxRounds)) cfg.maxRounds = overrides.maxRounds;
+  if (overrides.maxParallel !== undefined) cfg.maxParallel = overrides.maxParallel;
+  if (!Number.isInteger(cfg.maxParallel) || cfg.maxParallel < 1) fail(`maxParallel / --parallel は 1 以上の整数にしてください: ${cfg.maxParallel}`);
+  // priority: ランナー自身の OS 優先度。各タスクの loop.mjs にも --priority で渡す（子は引き継ぐが、ログに明示するため）
+  cfg.priority = overrides.priority ?? cfg.priority ?? 'normal';
+  if (!normalizePriority(cfg.priority)) fail(`priority が不正です: ${cfg.priority}（${PRIORITY_NAMES.join(' / ')}）`);
+  cfg.priority = normalizePriority(cfg.priority);
   if (Number.isFinite(overrides.maxCostUsd)) cfg.maxCostUsd = overrides.maxCostUsd;
   if (!Array.isArray(cfg.waves) || cfg.waves.length === 0) fail('waves が空です');
   if (!cfg.verify.command) fail('verify.command（統合検証）が設定されていません');
@@ -201,9 +214,10 @@ async function runPool(items, limit, fn) {
 }
 
 // loop.mjs を 1 タスク分、worktree の中で起動する
-function runLoop({ id, worktree, runDir, agent }) {
+function runLoop({ id, worktree, runDir, agent, priority }) {
   const args = [loopScript, '--task', id, '--worktree', worktree, '--run-dir', runDir, '--commit'];
   if (agent) args.push('--agent', agent);
+  if (priority && priority !== 'normal') args.push('--priority', priority);
   return new Promise((done) => {
     const started = Date.now();
     const chunks = [];
@@ -281,6 +295,7 @@ ${failures.map((f) => `### \`${f.command}\`（exit ${f.code ?? 'n/a'}）\n\`\`\`
   writeFileSync(join(dir, 'PROGRESS.md'), '# 進捗メモ（fix ループ）\n\n');
   const args = [loopScript, '--config', join(dir, 'loop.config.json'), '--run-dir', join(dir, 'run'), '--no-commit'];
   if (agent) args.push('--agent', agent);
+  if (cfg.priority !== 'normal') args.push('--priority', cfg.priority);
   const r = spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
   writeFileSync(join(dir, 'loop-output.txt'), (r.stdout ?? '') + (r.stderr ?? ''));
   let summary = null;
@@ -331,7 +346,9 @@ async function main() {
   if (dirty && !args.dryRun) fail(`作業ツリーがクリーンではありません。先にコミットするか戻してください:\n${tail(dirty, 10)}`);
 
   const log = (msg) => console.log(`[wave] ${msg}`);
-  log(`${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算$${cfg.maxCostUsd}  fix=${cfg.fix.enabled ? 'on' : 'off'}`);
+  const prio = applyPriority(cfg.priority);
+  if (prio.error) fail(`優先度を設定できません: ${prio.error}`);
+  log(`${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算${cfg.maxCostUsd}  fix=${cfg.fix.enabled ? 'on' : 'off'}  優先度=${prio.name}`);
   cfg.waves.forEach((w, i) => console.log(`  Wave ${i + 1} ${w.name}: ${w.tasks.join(', ')}`));
   if (args.dryRun) return console.log('[wave] ドライラン終了');
 
@@ -451,7 +468,7 @@ async function main() {
         }
         const taskRunDir = join(runDir, `${id}-r${round}`);
         mkdirSync(taskRunDir, { recursive: true });
-        jobs.push({ id, worktree, runDir: taskRunDir, agent: args.agent });
+        jobs.push({ id, worktree, runDir: taskRunDir, agent: args.agent, priority: cfg.priority });
       }
 
       // 2. 並列に loop.mjs を回す

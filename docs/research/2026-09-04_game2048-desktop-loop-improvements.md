@@ -249,6 +249,12 @@ wave ランナーの spec-issue 集約（項目 5）の本物での確認: `text
 |---|---|---|---|
 | 12 | blocked のタスクを再実行しない | wave ランナーは blocked になったタスクを「未完了」として次ラウンドで再実行していた。4 回目はラウンド上限で止まったが、上限が大きければ同じ申告を繰り返すだけになる。`wave.mjs` はタスクの `summary.json` が `blocked` なら理由をログに出し、進捗メモだけ取り込んで、ラウンドの終わりに `status: blocked` で停止する（`failedAt.blocked` にタスクと理由）。モック `MOCK_BREAK=3` がこの経路を通る | 未実装の textkit のクローンで `MOCK_BREAK=3`: 04 が差し戻し後のラウンド 2 で `<blocked>` → wave が 04 を再実行せず `blocked` で停止（ラウンド上限 3 を待たない）。**本物（textkit-revert 5 回目）**: 4 回目と同じ経過で、終了が `max_rounds` → `blocked`（`failedAt.blocked` にタスク 06 と理由）。$1.80 / 4 分 39 秒 / 起動 3 回、指摘 4 件 → 1 グループ |
 
+## 次の改善候補（運用で出たもの）→ 同日に実装
+
+| # | 改善 | 実装 | 確認 |
+|---|---|---|---|
+| 13 | PC の負荷を抑える | 本物の wave を回している間、内側の `claude -p` と検証が並列数ぶん同時に走って PC が重くなる。`wave.mjs` に `--parallel N`（`maxParallel` の上書き、1 以上の整数）と、`wave.mjs` / `loop.mjs` に `--priority normal|below-normal|low`（設定 `priority`）を足した。優先度はランナー自身の OS 優先度を `os.setPriority` で下げるだけで、子プロセス（loop.mjs、エージェント、検証）は Windows でも Linux でも引き継ぐ。wave は各タスクと fix の `loop.mjs` に `--priority` を明示して渡す。実装は `bin/lib/priority.mjs` | 偽エージェントに `os.getPriority()` を報告させ、`normal` / `below-normal` / `low` で 0 / 10 / 19 を確認。未実装の textkit のクローンで `--parallel 1 --priority low` のモック wave: Wave 2 の 3 タスクが 1 つずつ順に起動・完了、5 本の `loop.mjs` すべてが `OS 優先度: low` をログに出し、完了まで通常どおり |
+
 ### textkit-revert の 5 回の推移（同じ題材、同じ結末「差し戻して人に返す」）
 
 | 回 | 改善 | 結果 | 所要 | 費用 | 起動 | 指摘 |
