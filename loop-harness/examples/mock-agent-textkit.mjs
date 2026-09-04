@@ -6,6 +6,10 @@
 //   textkit-03-wordcount は 1 回目をわざと間違え、worktree 内の反復で直る様子を見せる。
 //   MOCK_CONFLICT=1 を付けると 03 と 04 が同じ src/CHANGELOG.md に別内容を書き、マージ衝突を起こす。
 //   衝突したタスクは次のラウンドで新しい HEAD から再実行され、そのときは既存の行に追記して衝突を避ける。
+//   MOCK_BREAK=1 を付けると 04 が契約（WORD_SEPARATOR）を壊す。04 自身のテストは通るが回帰検証で 01 のテストが落ち、
+//   ランナーの fix ループが起動する。fix のモックは契約を元に戻す。
+//   MOCK_BREAK=2 は同じ破壊をするが fix のモックは何もしない → 差し戻し経路に入る。
+//   差し戻し後の再実行では、進捗メモに「差し戻し」の記録があるのを見て契約を壊さない。
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs';
 
@@ -13,9 +17,20 @@ const prompt = readFileSync(0, 'utf8');
 const iteration = Number(prompt.match(/反復 (\d+)\//)?.[1] ?? 0);
 const verifyPassed = /検証: PASS/.test(prompt);
 const doneMarker = prompt.match(/末尾に (<promise>[^<]+<\/promise>)/)?.[1] ?? '<promise>COMPLETE</promise>';
-const taskId = prompt.match(/tasks[\\/]([^\\/\s)]+)[\\/]PROMPT\.md/)?.[1] ?? 'unknown';
+const isFix = /^# 回帰修正:/m.test(prompt);
+const taskId = isFix ? 'fix' : (prompt.match(/tasks[\\/]([^\\/\s)]+)[\\/]PROMPT\.md/)?.[1] ?? 'unknown');
 const progressFile = process.env.LOOP_PROGRESS_FILE;
 const conflict = process.env.MOCK_CONFLICT === '1';
+const breakMode = process.env.MOCK_BREAK ?? '';
+const wasReverted = /差し戻し/.test(prompt); // 進捗メモに差し戻しの記録がある = 前ラウンドで契約を壊した
+
+const contractSource = `/** truncate の既定最大長 */
+export const TRUNCATE_DEFAULT_MAX = 20;
+/** 切り詰め時に末尾へ付ける省略記号 */
+export const ELLIPSIS = '…';
+/** 単語の区切り（空白の連続） */
+export const WORD_SEPARATOR = /\\s+/;
+`;
 
 function note(lines) {
   if (!progressFile) return;
@@ -33,17 +48,16 @@ function changelog(line) {
 
 const impl = {
   'textkit-01-contract': () => {
-    write(
-      'src/contract.mjs',
-      `/** truncate の既定最大長 */
-export const TRUNCATE_DEFAULT_MAX = 20;
-/** 切り詰め時に末尾へ付ける省略記号 */
-export const ELLIPSIS = '…';
-/** 単語の区切り（空白の連続） */
-export const WORD_SEPARATOR = /\\s+/;
-`,
-    );
+    write('src/contract.mjs', contractSource);
     return ['やったこと: src/contract.mjs に定数 3 つを定義', '次にやるべきこと: 検証が通ったら完了条件を確認'];
+  },
+  // ランナーが生成した fix タスク。MOCK_BREAK=1 なら契約を戻して直す。=2 なら直せずに終わる（差し戻し経路の確認用）
+  fix: () => {
+    if (breakMode === '2') {
+      return ['やったこと: 原因を調べたが、契約の変更が必要に見えるため修正しなかった', '次にやるべきこと: 差し戻して元タスクで直す'];
+    }
+    write('src/contract.mjs', contractSource);
+    return ['やったこと: src/contract.mjs の WORD_SEPARATOR を /\\s+/ に戻した', '分かったこと: 直近のマージが契約を単一スペースに変えていた', '次にやるべきこと: 再検証'];
   },
   'textkit-02-slugify': () => {
     write(
@@ -103,7 +117,12 @@ export function truncate(text, max = TRUNCATE_DEFAULT_MAX) {
 `,
     );
     if (conflict) changelog('truncate を追加');
-    return ['やったこと: src/truncate.mjs を実装', '次にやるべきこと: 検証が通ったら完了条件を確認'];
+    if (breakMode && !wasReverted) {
+      // 契約を壊す（自分のテストには影響しない）。差し戻された後の再実行では壊さない
+      write('src/contract.mjs', contractSource.replace('/\\s+/', '/ /'));
+      return ['やったこと: src/truncate.mjs を実装。ついでに contract.mjs の WORD_SEPARATOR を単一スペースに「整理」した', '次にやるべきこと: 検証が通ったら完了条件を確認'];
+    }
+    return ['やったこと: src/truncate.mjs を実装' + (wasReverted ? '（前回の差し戻しを踏まえ、contract.mjs には触れていない）' : ''), '次にやるべきこと: 検証が通ったら完了条件を確認'];
   },
   'textkit-05-index': () => {
     write(

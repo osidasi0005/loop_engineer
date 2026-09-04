@@ -4,7 +4,7 @@
   "progressFile": "./PROGRESS.md",
   "runsDir": "../../runs/textkit-04-truncate",
   "verify": {
-    "command": "node --test test/contract.test.mjs test/truncate.test.mjs",
+    "command": "node --test test/truncate.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },

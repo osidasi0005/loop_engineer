@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// wave.mjs — 複数タスクを git worktree で並列に回し、ランナーがマージと統合検証を行う
+// wave.mjs — 複数タスクを git worktree で並列に回し、ランナーがマージと検証を行う
 //
 // claude-looper の Wave 構造を取り込んだもの。ただし判断はすべてランナー（このスクリプト）が行い、
 // エージェントは各 worktree の中で従来どおり loop.mjs として動くだけで、git もマージも知らない。
@@ -8,21 +8,24 @@
 //     1. 未完了タスクごとに worktree とブランチ loop/<id> を HEAD から作る
 //     2. 各 worktree で loop.mjs --worktree --commit を並列起動（maxParallel まで）
 //     3. 完了（exit 0）したタスクだけを 1 つずつ現在のブランチにマージ。衝突したら abort して未完了扱い
-//     4. 未完了タスクは worktree の PROGRESS.md だけを取り込む（コードは捨てて記憶だけ残す）
-//     5. マージが 1 つでもあれば回帰検証（これまでに完了した全タスクの検証コマンドを累積で実行）。FAIL なら停止
+//     4. マージのたびに回帰検証（これまでに完了した全タスクの検証コマンドを累積で実行）
+//          PASS → そのまま
+//          FAIL → 第 1 段: ランナーが fix タスクを生成し、狭い権限・小さい予算の loop.mjs を本体上で回す。通れば fix をコミット
+//                 第 2 段: fix でも通らなければ、そのマージだけを取り消し（reset --hard HEAD^）、失敗出力を進捗メモに添えて差し戻す
+//     5. 未完了タスク（未達 / 衝突 / 差し戻し）は worktree の PROGRESS.md だけを取り込む（コードは捨てて記憶だけ残す）
 //     6. 未完了が残れば次ラウンド（maxRounds まで）、無ければ次の Wave
-//   全 Wave が終わったら統合検証（wave.config.json の verify.command）を実行。FAIL なら失敗扱い
+//   全 Wave が終わったら統合検証（wave.config.json の verify.command）。FAIL なら fix ループを 1 回だけ試し、それでも FAIL なら失敗扱い
 //
 //   統合検証を毎 Wave 後に回すと「まだ実装していない後続 Wave のテスト」で落ちるため、
 //   途中は完了済みタスクの検証だけを回帰させ、全体のテストは最後にだけ回す（1 回目の試行で学んだ）。
 //
 // 使い方:  node bin/wave.mjs --wave <名前> [--agent "<cmd>"] [--max-rounds N] [--budget USD]
-//                            [--dry-run] [--keep-worktrees]
+//                            [--worktree-base <dir>] [--no-fix] [--dry-run] [--keep-worktrees]
 //
 // Wave は tasks/<名前>/wave.config.json で定義する。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, appendFileSync } from 'node:fs';
 import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -52,6 +55,7 @@ function parseArgs(argv) {
     else if (a === '--max-rounds') out.overrides.maxRounds = Number(next());
     else if (a === '--budget') out.overrides.maxCostUsd = Number(next());
     else if (a === '--worktree-base') out.overrides.worktreeBase = resolve(next());
+    else if (a === '--no-fix') out.overrides.fixEnabled = false;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--keep-worktrees') out.keepWorktrees = true;
     else if (a === '--help' || a === '-h') out.help = true;
@@ -68,6 +72,7 @@ function usage() {
   --max-rounds <N>    1 Wave あたりの最大ラウンド数を上書き
   --budget <USD>      全タスク合計のコスト上限を上書き
   --worktree-base <dir>  worktree を作る場所（既定: OS の一時ディレクトリ/loop-harness-wt。Windows のパス長制限を避けるため短い場所にする）
+  --no-fix            回帰・統合検証が落ちたときの fix ループを使わない（すぐ差し戻す / 失敗終了）
   --dry-run           実行計画だけ表示して終了
   --keep-worktrees    終了後も worktree とブランチを残す（調査用）
 `);
@@ -86,6 +91,16 @@ function loadConfig(path, overrides) {
   cfg.maxParallel = cfg.maxParallel ?? 4;
   cfg.maxRounds = cfg.maxRounds ?? 3;
   cfg.maxCostUsd = cfg.maxCostUsd ?? 10;
+  // 回帰・統合検証が落ちたときの fix ループ。権限を狭め（Write なし = 新規ファイル不可）、反復と予算を小さく絞る
+  cfg.fix = {
+    enabled: true,
+    maxIterations: 2,
+    maxCostUsd: 1,
+    allowedTools: 'Read,Edit,Glob,Grep,Bash(node:*),PowerShell(node:*)',
+    maxTurns: 20,
+    ...cfg.fix,
+  };
+  if (typeof overrides.fixEnabled === 'boolean') cfg.fix.enabled = overrides.fixEnabled;
   // worktree の置き場。リポジトリ内の runs/ に置くと Windows でパスが長くなり
   // 「fatal: '$GIT_DIR' too big」で作成に失敗することがあるため、既定は OS の一時ディレクトリ
   cfg.worktreeBase = overrides.worktreeBase ?? (cfg.worktreeBase ? abs(cfg.worktreeBase) : join(tmpdir(), 'loop-harness-wt'));
@@ -147,6 +162,21 @@ function runShell(command, { cwd, timeoutSec }) {
   return { ok: r.status === 0 && !r.error, code: r.status, ms: Date.now() - started, output: combined.trim() };
 }
 
+// 複数の検証コマンドを順に実行し、最初の失敗で止まる
+function runCommands(commands, cfg) {
+  const results = [];
+  for (const command of commands) {
+    const v = runShell(command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
+    results.push({ command, ...v });
+    if (!v.ok) break;
+  }
+  const ok = results.every((r) => r.ok);
+  const failed = results.find((r) => !r.ok) ?? null;
+  return { ok, results, failed };
+}
+const formatResults = (results) =>
+  results.map((r) => `$ ${r.command}\nexit ${r.code} / ${r.ms}ms\n\n${r.output}\n`).join('\n' + '='.repeat(60) + '\n');
+
 // 並列度を制限して非同期関数を回す
 async function runPool(items, limit, fn) {
   const results = new Array(items.length);
@@ -185,6 +215,84 @@ function runLoop({ id, worktree, runDir, agent }) {
   });
 }
 
+// ---------- fix ループ（回帰・統合検証が落ちたときの第 1 段） ----------
+// ランナーが fix タスク（設定・仕様・進捗メモ）を runs/ 配下に生成し、本体チェックアウト上で loop.mjs を回す。
+// 権限を狭め、反復と予算を絞る。通ったかどうかは呼び出し側がもう一度検証して決める（fix の自己申告は使わない）。
+function runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, agent }) {
+  mkdirSync(dir, { recursive: true });
+  const baseAgent = baseTaskId ? readTaskConfig(baseTaskId).agent : null;
+  const agentCfg = baseAgent
+    ? { ...baseAgent, args: narrowAgentArgs(baseAgent.args ?? [], cfg.fix) }
+    : { command: 'claude', args: ['-p', '--output-format', 'json', '--permission-mode', 'acceptEdits', '--allowedTools', cfg.fix.allowedTools, '--max-turns', String(cfg.fix.maxTurns)], timeoutSec: 1200 };
+  const config = {
+    taskName: label,
+    targetDir: cfg.repoDir,
+    promptFile: join(dir, 'PROMPT.md'),
+    progressFile: join(dir, 'PROGRESS.md'),
+    runsDir: dir,
+    verify: { command: failed.command, tailLines: cfg.verify.tailLines, timeoutSec: cfg.verify.timeoutSec },
+    git: { autoCommit: false },
+    agent: agentCfg,
+    loop: { maxIterations: cfg.fix.maxIterations, maxCostUsd: cfg.fix.maxCostUsd, stuckWarnAfter: 1, stuckStopAfter: 2 },
+  };
+  writeFileSync(join(dir, 'loop.config.json'), JSON.stringify(config, null, 2));
+  writeFileSync(
+    join(dir, 'PROMPT.md'),
+    `# 回帰修正: ${title}
+
+${situation}
+
+## 完了条件（すべて満たすこと）
+
+1. \`${failed.command}\` が PASS する
+2. \`test/\` を変更しない。テストを弱めたり削除したりしない
+3. 新しいファイルを作らない。既存ファイルの最小限の修正で直す
+4. export 名やシグネチャ（他モジュールとの契約）を変えない
+
+## 落ちた検証の出力
+
+\`\`\`
+${tail(failed.output, cfg.verify.tailLines)}
+\`\`\`
+
+## 方針
+
+- まず「直近のマージで何が変わったか」を疑う。\`git diff --name-only HEAD^ HEAD\` で変更ファイルを見る
+- 落ちたテストが期待する振る舞いに合わせて、変更されたコードの側を直す
+- 直し方が分からない、または大きな変更が必要なら、進捗メモに理由を書いて終了する（ランナーが差し戻す）
+`,
+  );
+  writeFileSync(join(dir, 'PROGRESS.md'), '# 進捗メモ（fix ループ）\n\n');
+  const args = [loopScript, '--config', join(dir, 'loop.config.json'), '--run-dir', join(dir, 'run'), '--no-commit'];
+  if (agent) args.push('--agent', agent);
+  const r = spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  writeFileSync(join(dir, 'loop-output.txt'), (r.stdout ?? '') + (r.stderr ?? ''));
+  let summary = null;
+  try {
+    summary = JSON.parse(readFileSync(join(dir, 'run', 'summary.json'), 'utf8'));
+  } catch {
+    // 起動前に失敗
+  }
+  return { status: summary?.status ?? 'launch_failed', iterations: summary?.iteration ?? 0, costUsd: summary?.totalCostUsd ?? 0 };
+}
+
+// タスクのエージェント引数を fix 用に狭める（--allowedTools と --max-turns を差し替え）
+function narrowAgentArgs(args, fix) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--allowedTools') {
+      out.push('--allowedTools', fix.allowedTools);
+      i++;
+    } else if (args[i] === '--max-turns') {
+      out.push('--max-turns', String(fix.maxTurns));
+      i++;
+    } else out.push(args[i]);
+  }
+  if (!out.includes('--allowedTools')) out.push('--allowedTools', fix.allowedTools);
+  if (!out.includes('--max-turns')) out.push('--max-turns', String(fix.maxTurns));
+  return out;
+}
+
 // ---------- メイン ----------
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -201,7 +309,7 @@ async function main() {
   if (dirty && !args.dryRun) fail(`作業ツリーがクリーンではありません。先にコミットするか戻してください:\n${tail(dirty, 10)}`);
 
   const log = (msg) => console.log(`[wave] ${msg}`);
-  log(`${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算$${cfg.maxCostUsd}`);
+  log(`${cfg.name}  リポジトリ=${toplevel}  ブランチ=${branch}  並列${cfg.maxParallel}  ラウンド上限${cfg.maxRounds}  予算$${cfg.maxCostUsd}  fix=${cfg.fix.enabled ? 'on' : 'off'}`);
   cfg.waves.forEach((w, i) => console.log(`  Wave ${i + 1} ${w.name}: ${w.tasks.join(', ')}`));
   if (args.dryRun) return console.log('[wave] ドライラン終了');
 
@@ -212,7 +320,7 @@ async function main() {
   const wtBase = join(cfg.worktreeBase, `${cfg.name}-${stamp.slice(0, 16).replace(/\D/g, '')}`);
   mkdirSync(wtBase, { recursive: true });
   log(`worktree=${wtBase}`);
-  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [] };
+  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [], fixes: [] };
   const summaryPath = join(runDir, 'wave-summary.json');
   const save = () => writeFileSync(summaryPath, JSON.stringify(state, null, 2));
 
@@ -220,6 +328,29 @@ async function main() {
     if (args.keepWorktrees) return;
     git(['worktree', 'remove', '--force', worktree], toplevel);
     git(['branch', '-D', `loop/${id}`], toplevel);
+  };
+  // 本体チェックアウトの repoDir 配下を HEAD の状態に戻す（fix ループの失敗後など）
+  const discardWorkingChanges = () => {
+    git(['checkout', '--', cfg.repoDir], toplevel);
+    git(['clean', '-fd', '--', cfg.repoDir], toplevel);
+  };
+  // 完了済みタスクの検証コマンドを累積した回帰検証
+  const regressionCommands = (wave, extraIds = []) => {
+    const done = state.waves.flatMap((w) => Object.entries(w.done).filter(([, d]) => d).map(([id]) => id));
+    return wave.verify ? [wave.verify] : [...new Set([...done, ...extraIds].map(taskVerifyCommand).filter(Boolean))];
+  };
+  // 回帰・統合検証が落ちたときの第 1 段: fix ループを回し、もう一度同じ検証で判定する
+  const tryFix = ({ label, title, situation, commands, failed, baseTaskId }) => {
+    const dir = join(runDir, `fix-${label}`);
+    log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで）→ ${dir}`);
+    const fx = runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, agent: args.agent });
+    state.totalCostUsd += fx.costUsd;
+    const again = runCommands(commands, cfg);
+    writeFileSync(join(dir, 'recheck.txt'), formatResults(again.results));
+    const record = { label, fixStatus: fx.status, iterations: fx.iterations, costUsd: fx.costUsd, recheckOk: again.ok };
+    state.fixes.push(record);
+    log(`  fix ループ ${fx.status}（${fx.iterations} 反復、$${fx.costUsd.toFixed(4)}）→ 再検証 ${again.ok ? 'PASS' : 'FAIL'}`);
+    return { ok: again.ok, record, again };
   };
 
   outer: for (const [wi, wave] of cfg.waves.entries()) {
@@ -266,83 +397,93 @@ async function main() {
         return { ...job, ...r };
       });
 
-      // 3. 完了したタスクだけを直列にマージ
-      let mergedCount = 0;
+      // 3〜5. 完了したタスクを 1 つずつマージし、そのたびに回帰検証。落ちたら fix → 差し戻し
       for (const r of results) {
         const t = { status: r.summary?.status ?? 'launch_failed', iterations: r.summary?.iteration ?? 0, costUsd: r.summary?.totalCostUsd ?? 0, commit: null };
         roundState.tasks[r.id] = t;
         const ahead = Number(git(['rev-list', '--count', `HEAD..loop/${r.id}`], toplevel).stdout || 0);
-        if (t.status === 'complete') {
-          if (ahead === 0) {
-            t.merge = 'no_changes';
-            waveState.done[r.id] = true;
-            log(`  ${r.id}: 完了だがコミットなし（変更不要）`);
-          } else {
-            const m = git(['merge', '--no-ff', '--no-edit', '-m', `wave(${cfg.name}/${wave.name}): ${r.id} をマージ（${ahead} コミット）`, `loop/${r.id}`], toplevel);
-            if (m.code === 0) {
-              t.merge = 'merged';
-              t.commit = git(['rev-parse', '--short', 'HEAD'], toplevel).stdout;
-              waveState.done[r.id] = true;
-              mergedCount++;
-              state.merges.push({ wave: wave.name, round, id: r.id, commit: t.commit, commits: ahead });
-              log(`  ${r.id}: マージ ${t.commit}（${ahead} コミット）`);
-            } else {
-              git(['merge', '--abort'], toplevel);
-              t.merge = 'conflict';
-              t.detail = tail(m.stdout + '\n' + m.stderr, 8);
-              log(`  ${r.id}: マージ衝突 → abort。次ラウンドで再実行`);
-            }
-          }
-        } else {
+        let failureNote = null; // 差し戻し時に進捗メモへ添える説明
+
+        if (t.status !== 'complete') {
           t.merge = 'skipped';
           log(`  ${r.id}: 未完了（${t.status}）→ コードは捨て、進捗メモだけ取り込む`);
+        } else if (ahead === 0) {
+          t.merge = 'no_changes';
+          waveState.done[r.id] = true;
+          log(`  ${r.id}: 完了だがコミットなし（変更不要）`);
+        } else {
+          const m = git(['merge', '--no-ff', '--no-edit', '-m', `wave(${cfg.name}/${wave.name}): ${r.id} をマージ（${ahead} コミット）`, `loop/${r.id}`], toplevel);
+          if (m.code !== 0) {
+            git(['merge', '--abort'], toplevel);
+            t.merge = 'conflict';
+            t.detail = tail(m.stdout + '\n' + m.stderr, 8);
+            log(`  ${r.id}: マージ衝突 → abort。次ラウンドで再実行`);
+          } else {
+            const mergeCommit = git(['rev-parse', '--short', 'HEAD'], toplevel).stdout;
+            // 4. 回帰検証（このタスクを含めた累積）
+            const commands = regressionCommands(wave, [r.id]);
+            let reg = runCommands(commands, cfg);
+            writeFileSync(join(runDir, `regression-${r.id}-r${round}.txt`), formatResults(reg.results));
+            t.regression = { ok: reg.ok, commands: reg.results.map(({ command, ok, code, ms }) => ({ command, ok, code, ms })) };
+            log(`  ${r.id}: マージ ${mergeCommit}（${ahead} コミット）→ 回帰検証 ${reg.ok ? 'PASS' : 'FAIL'}（${commands.length} コマンド）`);
+
+            if (!reg.ok && cfg.fix.enabled) {
+              // 第 1 段: fix ループ
+              const fx = tryFix({
+                label: `${r.id}-r${round}`,
+                title: `${r.id} のマージ後に回帰検証が失敗`,
+                situation: `Wave「${wave.name}」でタスク ${r.id} をマージした直後、これまでに完了したタスクの検証を回帰させたところ失敗した。\n作業ディレクトリは本体チェックアウト（マージ済みの状態）。直近のマージ ${mergeCommit} が原因の可能性が高い。`,
+                commands,
+                failed: reg.failed,
+                baseTaskId: r.id,
+              });
+              if (fx.ok) {
+                git(['add', '-A', '--', cfg.repoDir], toplevel);
+                const c = git(['commit', '-q', '-m', `fix(${cfg.name}/${wave.name}): ${r.id} のマージ後の回帰を修正（ランナー起動の fix ループ、${fx.record.iterations} 反復、$${fx.record.costUsd.toFixed(4)}）`], toplevel);
+                t.fix = { ...fx.record, commit: c.code === 0 ? git(['rev-parse', '--short', 'HEAD'], toplevel).stdout : null };
+                reg = fx.again;
+              } else {
+                t.fix = fx.record;
+                discardWorkingChanges();
+              }
+            }
+
+            if (reg.ok) {
+              t.merge = 'merged';
+              t.commit = mergeCommit;
+              waveState.done[r.id] = true;
+              state.merges.push({ wave: wave.name, round, id: r.id, commit: mergeCommit, commits: ahead, fixed: Boolean(t.fix?.commit) });
+            } else {
+              // 第 2 段: このマージだけを取り消して差し戻す（HEAD^ = マージ前）
+              git(['reset', '-q', '--hard', 'HEAD^'], toplevel);
+              t.merge = 'reverted';
+              t.detail = tail(reg.failed.output, 12);
+              failureNote = `### ランナー: ラウンド ${round} のマージは回帰検証で差し戻し\n` +
+                `マージ後に \`${reg.failed.command}\` が失敗した${cfg.fix.enabled ? '（fix ループでも直らなかった）' : ''}。マージは取り消され、コードは破棄された。\n` +
+                `次の実行では、他のタスクが担当するファイルや契約（共有定数・interface）を変更していないかを最初に確認すること。\n\`\`\`\n${tail(reg.failed.output, 30)}\n\`\`\`\n`;
+              log(`  ${r.id}: 回帰検証 FAIL のためマージを取り消し → 次ラウンドで再実行`);
+            }
+          }
         }
 
-        // 4. マージされなかったタスクは PROGRESS.md だけを救う（記憶は残し、コードは捨てる）
+        // 5. マージされなかったタスクは PROGRESS.md だけを救う（記憶は残し、コードは捨てる）
         if (!waveState.done[r.id] && ahead > 0) {
           const rel = taskProgressRelPath(r.id, toplevel);
           if (rel) {
             const show = git(['show', `loop/${r.id}:${rel}`], toplevel);
             const current = existsSync(join(toplevel, rel)) ? readFileSync(join(toplevel, rel), 'utf8') : '';
-            if (show.code === 0 && show.stdout && show.stdout.trim() !== current.trim()) {
-              writeFileSync(join(toplevel, rel), show.stdout.replace(/\r?\n/g, '\n') + '\n');
+            let next = show.code === 0 && show.stdout ? show.stdout.replace(/\r?\n/g, '\n') + '\n' : current;
+            if (failureNote) next += `\n${failureNote}`;
+            if (next.trim() !== current.trim()) {
+              writeFileSync(join(toplevel, rel), next);
               git(['add', '--', rel], toplevel);
-              const c = git(['commit', '-q', '-m', `wave(${cfg.name}/${wave.name}): ${r.id} の進捗メモを取り込み（コードは未完了のため破棄、ラウンド ${round}）`], toplevel);
+              const c = git(['commit', '-q', '-m', `wave(${cfg.name}/${wave.name}): ${r.id} の進捗メモを取り込み（コードは${t.merge === 'reverted' ? '差し戻し' : '未完了のため破棄'}、ラウンド ${round}）`], toplevel);
               t.progressSalvaged = c.code === 0;
             }
           }
         }
         cleanup(r.id, r.worktree);
-      }
-      save();
-
-      // 5. 回帰検証（マージが 1 つでもあれば）: これまでに完了した全タスクの検証コマンドを累積で回す。
-      //    Wave 単位で verify が指定されていればそれを使う。全体の統合検証は全 Wave 終了後にだけ行う
-      if (mergedCount > 0) {
-        const completedSoFar = state.waves.flatMap((w) => Object.entries(w.done).filter(([, d]) => d).map(([id]) => id));
-        const commands = wave.verify ? [wave.verify] : [...new Set(completedSoFar.map(taskVerifyCommand).filter(Boolean))];
-        const results = [];
-        let allOk = true;
-        for (const command of commands) {
-          const v = runShell(command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
-          results.push({ command, ok: v.ok, code: v.code, ms: v.ms, output: v.output });
-          if (!v.ok) {
-            allOk = false;
-            break;
-          }
-        }
-        writeFileSync(
-          join(runDir, `regression-w${wi + 1}-r${round}.txt`),
-          results.map((r) => `$ ${r.command}\nexit ${r.code} / ${r.ms}ms\n\n${r.output}\n`).join('\n' + '='.repeat(60) + '\n'),
-        );
-        roundState.regression = { ok: allOk, commands: results.map(({ command, ok, code, ms }) => ({ command, ok, code, ms })) };
-        log(`  回帰検証 ${allOk ? 'PASS' : 'FAIL'}（完了済み ${completedSoFar.length} タスク / ${commands.length} コマンド）`);
-        if (!allOk) {
-          console.log(tail(results.at(-1).output, cfg.verify.tailLines));
-          state.status = 'regression_failed';
-          state.failedAt = { wave: wave.name, round };
-          break outer;
-        }
+        save();
       }
 
       // 6. 停止条件
@@ -363,11 +504,28 @@ async function main() {
 
   // 全 Wave 終了後の統合検証（全体テスト）。ここが真実の源で、エージェントの自己申告は使わない
   if (state.status === 'running') {
-    const v = runShell(cfg.verify.command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
-    writeFileSync(join(runDir, 'integration.txt'), `$ ${cfg.verify.command}\nexit ${v.code} / ${v.ms}ms\n\n${v.output}`);
-    state.integration = { ok: v.ok, code: v.code, ms: v.ms };
-    log(`統合検証 ${v.ok ? 'PASS' : 'FAIL'} (exit ${v.code}, ${v.ms}ms)`);
-    if (!v.ok) console.log(tail(v.output, cfg.verify.tailLines));
+    let v = runCommands([cfg.verify.command], cfg);
+    writeFileSync(join(runDir, 'integration.txt'), formatResults(v.results));
+    log(`統合検証 ${v.ok ? 'PASS' : 'FAIL'}`);
+    if (!v.ok && cfg.fix.enabled) {
+      const fx = tryFix({
+        label: 'integration',
+        title: '全 Wave 終了後の統合検証が失敗',
+        situation: `全 Wave のタスクをマージし終えた状態で、全体の検証コマンドを実行したところ失敗した。作業ディレクトリは本体チェックアウト。`,
+        commands: [cfg.verify.command],
+        failed: v.failed,
+        baseTaskId: cfg.waves.at(-1).tasks.at(-1),
+      });
+      if (fx.ok) {
+        git(['add', '-A', '--', cfg.repoDir], toplevel);
+        git(['commit', '-q', '-m', `fix(${cfg.name}): 統合検証の失敗を修正（ランナー起動の fix ループ、${fx.record.iterations} 反復、$${fx.record.costUsd.toFixed(4)}）`], toplevel);
+        v = fx.again;
+      } else {
+        discardWorkingChanges();
+      }
+    }
+    if (!v.ok) console.log(tail(v.failed.output, cfg.verify.tailLines));
+    state.integration = { ok: v.ok };
     state.status = v.ok ? 'complete' : 'integration_failed';
   }
   state.finishedAt = new Date().toISOString();
@@ -377,13 +535,12 @@ async function main() {
 
   const label = {
     complete: '完了（全 Wave のタスクをマージし統合検証 PASS）',
-    regression_failed: '回帰検証 FAIL（マージ後に完了済みタスクの検証が落ちた）',
     integration_failed: '統合検証 FAIL（全 Wave 終了後の全体テストが落ちた）',
     budget_exceeded: '予算超過',
     max_rounds: 'ラウンド上限（未完了タスクあり）',
     worktree_failed: 'worktree 作成失敗（環境の問題。--worktree-base で短いパスを指定するなど）',
   }[state.status];
-  log(`終了: ${label}  マージ${state.merges.length}件  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
+  log(`終了: ${label}  マージ${state.merges.length}件  fix ${state.fixes.length}回  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
 }
 

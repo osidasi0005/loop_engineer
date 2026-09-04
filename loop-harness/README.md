@@ -223,6 +223,9 @@ node examples/mazechase/src/cli.mjs
    `tasks/<名前>/` に `loop.config.json`（パスは相対に変換済み）、`PROMPT.md`（穴埋め式の雛形）、`PROGRESS.md`（空）ができる。
 3. `tasks/<名前>/PROMPT.md` を書く。**完了条件を検証コマンドで機械的に判定できる形にする**のが最重要。
    検証で判定できない条件は番号付きで残しておくと、エージェントが完了宣言の前に自分で確認する。
+   雛形の見出し（作成するファイル / 型定義・シグネチャ / 仕様 / import 先 / 実装パターン / 注意事項）は、
+   エージェントが他のドキュメントや既存コードを読まずに実装できる粒度を狙ったもの。export 名とシグネチャをここで確定させると、
+   Wave 並列のときに他タスクとの契約になる。
 4. `node bin/loop.mjs --task <名前> --verify-only` で検証コマンドが動くことを確認してから、
    `node bin/loop.mjs --task <名前> --max 3 --budget 1` で小さく回す。
 
