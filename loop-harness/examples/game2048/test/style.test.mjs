@@ -4,14 +4,18 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const probe = join(root, 'test', 'helpers', 'probe.cjs');
 const electronPath = createRequire(import.meta.url)('electron');
 
-/** probe.cjs を起動し、PROBE 行の JSON を返す */
+/** probe.cjs を起動し、PROBE 行の JSON を返す。起動前に app/ の存在を assert する（未実装なら数秒で FAIL） */
 function runProbe(size, state) {
+  for (const f of ['index.html', 'preload.cjs', 'style.css']) {
+    assert.ok(existsSync(join(root, 'app', f)), `app/${f} がない（未実装）。Electron を起動せずに FAIL にする`);
+  }
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
   const r = spawnSync(electronPath, [probe, String(size), JSON.stringify(state)], {

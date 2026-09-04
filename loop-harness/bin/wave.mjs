@@ -286,7 +286,7 @@ ${tail(failed.output, cfg.verify.tailLines)}
   } catch {
     // 起動前に失敗
   }
-  return { status: summary?.status ?? 'launch_failed', iterations: summary?.iteration ?? 0, costUsd: summary?.totalCostUsd ?? 0 };
+  return { status: summary?.status ?? 'launch_failed', iterations: summary?.iteration ?? 0, costUsd: summary?.totalCostUsd ?? 0, specIssues: summary?.specIssues ?? [] };
 }
 
 // タスクのエージェント引数を fix 用に狭める（--allowedTools と --max-turns を差し替え）
@@ -333,9 +333,17 @@ async function main() {
   const wtBase = join(cfg.worktreeBase, `${cfg.name}-${stamp.slice(0, 16).replace(/\D/g, '')}`);
   mkdirSync(wtBase, { recursive: true });
   log(`worktree=${wtBase}`);
-  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [], fixes: [] };
+  // specIssues: 各タスク（と fix ループ）のエージェントが <spec-issue> で報告した仕様の抜け・矛盾を集約する。
+  // 差し戻しの多くは「仕様がテストと矛盾」が原因だったので、進捗メモに埋もれさせず終了時に列挙して人に返す
+  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [], fixes: [], specIssues: [] };
   const summaryPath = join(runDir, 'wave-summary.json');
   const save = () => writeFileSync(summaryPath, JSON.stringify(state, null, 2));
+  const collectSpecIssues = (source, summary) => {
+    for (const s of summary?.specIssues ?? []) {
+      state.specIssues.push({ source, iteration: s.iteration, text: s.text });
+      log(`  ${source}: 仕様への指摘（反復 ${s.iteration}）: ${String(s.text).replace(/\s*\n\s*/g, ' ')}`);
+    }
+  };
 
   const cleanup = (id, worktree) => {
     if (args.keepWorktrees) return;
@@ -367,6 +375,7 @@ async function main() {
     log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで）→ ${dir}`);
     const fx = runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseTaskId, agent: args.agent });
     state.totalCostUsd += fx.costUsd;
+    collectSpecIssues(`fix-${label}`, fx);
     const protectedChanged = fixTouchedProtected();
     let again = runCommands(commands, cfg);
     writeFileSync(join(dir, 'recheck.txt'), (protectedChanged ? `保護パスが変更された:\n${protectedChanged}\n\n` : '') + formatResults(again.results));
@@ -441,6 +450,7 @@ async function main() {
         const cost = s?.totalCostUsd ?? 0;
         state.totalCostUsd += cost;
         log(`  ${job.id}: ${s ? s.status : `起動失敗 (exit ${r.code})`}  反復${s?.iteration ?? '-'}回  $${cost.toFixed(4)}  ${Math.round(r.ms / 1000)}s`);
+        collectSpecIssues(job.id, s);
         return { ...job, ...r };
       });
 
@@ -587,6 +597,10 @@ async function main() {
     max_rounds: 'ラウンド上限（未完了タスクあり）',
     worktree_failed: 'worktree 作成失敗（環境の問題。--worktree-base で短いパスを指定するなど）',
   }[state.status];
+  if (state.specIssues.length) {
+    log(`仕様への指摘 ${state.specIssues.length} 件（エージェントが <spec-issue> で報告。仕様を見直してから再実行する）:`);
+    for (const s of state.specIssues) log(`  - [${s.source} 反復 ${s.iteration}] ${String(s.text).replace(/\s*\n\s*/g, ' ')}`);
+  }
   log(`終了: ${label}  マージ${state.merges.length}件  fix ${state.fixes.length}回  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
 }

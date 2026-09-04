@@ -18,8 +18,6 @@
       "acceptEdits",
       "--allowedTools",
       "Read,Edit,Write,Glob,Grep,Bash(node:*),PowerShell(node:*)",
-      "--disallowedTools",
-      "Bash(git:*),PowerShell(git:*)",
       "--max-turns",
       "40",
       "--model",
