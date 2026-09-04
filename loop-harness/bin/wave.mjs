@@ -15,7 +15,8 @@
 //                   <blocked> で「実装側では直せない」と申告したら loop.mjs が即停止する）
 //                 第 2 段: fix でも通らなければ、そのマージだけを取り消し（reset --hard HEAD^）、失敗出力を進捗メモに添えて差し戻す
 //     5. 未完了タスク（未達 / 衝突 / 差し戻し）は worktree の PROGRESS.md だけを取り込む（コードは捨てて記憶だけ残す）
-//     6. 未完了が残れば次ラウンド（maxRounds まで）、無ければ次の Wave
+//     6. 未完了が残れば次ラウンド（maxRounds まで）、無ければ次の Wave。
+//        ただしタスクのエージェントが <blocked> で「自分では直せない」と申告したら、再実行せずに止めて人間に返す
 //   全 Wave が終わったら統合検証（wave.config.json の verify.command）。FAIL なら fix ループを 1 回だけ試し、それでも FAIL なら失敗扱い
 //
 //   統合検証を毎 Wave 後に回すと「まだ実装していない後続 Wave のテスト」で落ちるため、
@@ -427,6 +428,7 @@ async function main() {
     for (let round = 1; round <= cfg.maxRounds; round++) {
       const pending = wave.tasks.filter((id) => !waveState.done[id]);
       if (pending.length === 0) break;
+      const blockedTasks = []; // このラウンドで <blocked> を申告したタスク
       log(`━━ Wave ${wi + 1} ${wave.name}  ラウンド ${round}/${cfg.maxRounds}: ${pending.join(', ')}`);
       const roundState = { round, tasks: {} };
       waveState.rounds.push(roundState);
@@ -471,7 +473,15 @@ async function main() {
         const ahead = Number(git(['rev-list', '--count', `HEAD..loop/${r.id}`], toplevel).stdout || 0);
         let failureNote = null; // 差し戻し時に進捗メモへ添える説明
 
-        if (t.status !== 'complete') {
+        if (t.status === 'blocked') {
+          // タスクのエージェントが「自分の権限では直せない」と申告した。次ラウンドで再実行しても同じ申告になるので、
+          // コードは捨てて進捗メモだけ取り込み、ラウンドの終わりで Wave を止めて人間に返す
+          t.merge = 'skipped';
+          t.blocked = r.summary?.blocked ?? null;
+          blockedTasks.push({ id: r.id, iteration: t.blocked?.iteration ?? null, reason: t.blocked?.reason ?? '' });
+          log(`  ${r.id}: エージェントが「自分では直せない」と申告（反復 ${t.blocked?.iteration ?? '?'}）→ コードは捨て、進捗メモだけ取り込む。再実行はしない`);
+          log(`    理由: ${oneLine(t.blocked?.reason, 300)}`);
+        } else if (t.status !== 'complete') {
           t.merge = 'skipped';
           log(`  ${r.id}: 未完了（${t.status}）→ コードは捨て、進捗メモだけ取り込む`);
         } else if (ahead === 0) {
@@ -561,6 +571,13 @@ async function main() {
         log(`予算超過 $${state.totalCostUsd.toFixed(4)} > $${cfg.maxCostUsd}`);
         break outer;
       }
+      if (blockedTasks.length > 0) {
+        // 「直せない」と申告したタスクがある。ラウンドを重ねても同じ申告を繰り返すだけなので、ここで人間に返す
+        state.status = 'blocked';
+        state.failedAt = { wave: wave.name, round, blocked: blockedTasks };
+        log(`タスクが「自分では直せない」と申告したため停止（人間の判断待ち）: ${blockedTasks.map((b) => b.id).join(', ')}`);
+        break outer;
+      }
       const remaining = wave.tasks.filter((id) => !waveState.done[id]);
       if (remaining.length > 0 && round === cfg.maxRounds) {
         state.status = 'max_rounds';
@@ -607,6 +624,7 @@ async function main() {
     integration_failed: '統合検証 FAIL（全 Wave 終了後の全体テストが落ちた）',
     budget_exceeded: '予算超過',
     max_rounds: 'ラウンド上限（未完了タスクあり）',
+    blocked: 'タスクが「自分では直せない」と申告（人間の判断待ち。仕様か環境を直してから再実行する）',
     worktree_failed: 'worktree 作成失敗（環境の問題。--worktree-base で短いパスを指定するなど）',
   }[state.status];
   state.specIssueGroups = groupSpecIssues(state.specIssues).map(({ refs, count, sources, text }) => ({ refs, count, sources, text }));
