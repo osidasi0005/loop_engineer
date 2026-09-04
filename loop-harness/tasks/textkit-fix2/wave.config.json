@@ -2,7 +2,7 @@
   "repoDir": "../../examples/textkit",
   "runsDir": "../../runs/textkit-fix2",
   "verify": {
-    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test/contract-shape.test.mjs test/slug-length.test.mjs",
+    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs ../textkit-rules/contract-shape.test.mjs test/slug-length.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },
@@ -13,7 +13,8 @@
     "textkit-04-truncate"
   ],
   "regressionCommands": [
-    "node --test test/index.test.mjs test/contract-shape.test.mjs"
+    "node --test test/index.test.mjs",
+    "node --test ../textkit-rules/contract-shape.test.mjs"
   ],
   "waves": [
     {
