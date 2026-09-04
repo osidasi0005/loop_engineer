@@ -20,3 +20,21 @@
 
 
 - [ランナー] 反復 1: 検証 FAIL → エージェント 12 ターン / $0.5032
+
+### 反復 2
+
+やったこと:
+- コード変更はなし。反復 1 の実装がそのまま残っていることを確認し、完了条件を 1 つずつ検証した。
+  1. `node --test test/slug-length.test.mjs` → ランナー検証 PASS（3 件）。手元でも `node --test "test/*.test.mjs"` で 20 件すべて PASS。
+  2. 依存パッケージ追加なし（`examples/textkit` に package.json 自体が存在せず、`git status` もクリーン）。
+  3. `test/` は未変更（直前コミットの差分は `src/contract.mjs` / `src/slugify.mjs` / PROGRESS.md の 3 ファイルのみ）。
+  4. 追加・変更した export に JSDoc あり（`MAX_SLUG_LENGTH` に 1 行、`slugify` に切り詰めの説明を含む 5 行）。
+
+分かったこと:
+- 反復 1 の変更はコミット 0261f45 に含まれており、作業ツリーはクリーン。追加作業は不要だった。
+- `test-experiments/` には別タスク（06-ellipsis / truncate-words）向けの未実装機能テストがあり FAIL するが、このタスクの検証コマンド（`test/slug-length.test.mjs`）にも完了条件にも含まれないため対象外。仕様の「変更するファイル」外なので手を入れない。
+
+次にやるべきこと:
+- なし。完了条件 4 つをすべて満たしているため COMPLETE とした。
+
+- [ランナー] 反復 2: 検証 PASS → エージェント 9 ターン / $0.4753 / 完了宣言あり
