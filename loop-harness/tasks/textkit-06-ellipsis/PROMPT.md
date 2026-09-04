@@ -4,7 +4,7 @@
 
 ## 完了条件（すべて満たすこと）
 
-1. `node --test test/ellipsis.test.mjs` が PASS する
+1. `node --test test-experiments/ellipsis.test.mjs` が PASS する
 2. 依存パッケージを追加しない
 3. `test/` を変更しない
 4. 各 export の JSDoc を保つ

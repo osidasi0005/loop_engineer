@@ -2,7 +2,7 @@
   "repoDir": "../../examples/textkit",
   "runsDir": "../../runs/textkit-fix",
   "verify": {
-    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test/truncate-words.test.mjs",
+    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test-experiments/truncate-words.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },

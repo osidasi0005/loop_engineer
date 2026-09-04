@@ -2,9 +2,9 @@
   "targetDir": "../../examples/textkit",
   "promptFile": "./PROMPT.md",
   "progressFile": "./PROGRESS.md",
-  "runsDir": "../../runs/textkit-06-ellipsis",
+  "runsDir": "../../runs/textkit-09-slug-length",
   "verify": {
-    "command": "node --test test-experiments/ellipsis.test.mjs",
+    "command": "node --test test/slug-length.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },

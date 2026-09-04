@@ -2,7 +2,7 @@
   "repoDir": "../../examples/textkit",
   "runsDir": "../../runs/textkit-revert",
   "verify": {
-    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test/ellipsis.test.mjs",
+    "command": "node --test test/contract.test.mjs test/slugify.test.mjs test/wordcount.test.mjs test/truncate.test.mjs test/index.test.mjs test-experiments/ellipsis.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },

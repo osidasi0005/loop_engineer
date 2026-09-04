@@ -103,6 +103,8 @@ function loadConfig(path, overrides) {
   };
   // この wave の実行前から完了しているタスク。回帰検証にその検証コマンドを含める（既存コードの上に拡張を載せるとき）
   cfg.regressionTasks = cfg.regressionTasks ?? [];
+  // タスクに紐づかない回帰検証コマンド（設計ルールのテストなど）
+  cfg.regressionCommands = cfg.regressionCommands ?? [];
   if (typeof overrides.fixEnabled === 'boolean') cfg.fix.enabled = overrides.fixEnabled;
   // worktree の置き場。リポジトリ内の runs/ に置くと Windows でパスが長くなり
   // 「fatal: '$GIT_DIR' too big」で作成に失敗することがあるため、既定は OS の一時ディレクトリ
@@ -224,7 +226,10 @@ function runLoop({ id, worktree, runDir, agent }) {
 // ---------- fix ループ（回帰・統合検証が落ちたときの第 1 段） ----------
 // ランナーが fix タスク（設定・仕様・進捗メモ）を runs/ 配下に生成し、本体チェックアウト上で loop.mjs を回す。
 // 権限を狭め、反復と予算を絞る。通ったかどうかは呼び出し側がもう一度検証して決める（fix の自己申告は使わない）。
-function runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, agent }) {
+function runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseTaskId, agent }) {
+  // fix ループ自身の検証はランナーの再検証と同じ全コマンド。落ちた 1 つだけにすると
+  // 「それだけ通して完了宣言 → 再検証で別のコマンドが落ちる」になる（本物のエージェントで観察した）
+  const verifyCommand = commands.join(' && ');
   mkdirSync(dir, { recursive: true });
   const baseAgent = baseTaskId ? readTaskConfig(baseTaskId).agent : null;
   const agentCfg = baseAgent
@@ -236,7 +241,7 @@ function runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, age
     promptFile: join(dir, 'PROMPT.md'),
     progressFile: join(dir, 'PROGRESS.md'),
     runsDir: dir,
-    verify: { command: failed.command, tailLines: cfg.verify.tailLines, timeoutSec: cfg.verify.timeoutSec },
+    verify: { command: verifyCommand, tailLines: cfg.verify.tailLines, timeoutSec: cfg.verify.timeoutSec },
     git: { autoCommit: false },
     agent: agentCfg,
     loop: { maxIterations: cfg.fix.maxIterations, maxCostUsd: cfg.fix.maxCostUsd, stuckWarnAfter: 1, stuckStopAfter: 2 },
@@ -250,7 +255,8 @@ ${situation}
 
 ## 完了条件（すべて満たすこと）
 
-1. \`${failed.command}\` が PASS する
+1. 次の検証がすべて PASS する（落ちているのは \`${failed.command}\`。他は現在 PASS しており、壊さないこと）
+   \`${verifyCommand}\`
 2. \`test/\` を変更しない。テストを弱めたり削除したりしない
 3. 新しいファイルを作らない。既存ファイルの最小限の修正で直す
 4. export 名やシグネチャ（他モジュールとの契約）を変えない
@@ -266,6 +272,7 @@ ${tail(failed.output, cfg.verify.tailLines)}
 - まず「直近のマージで何が変わったか」を疑う。\`git diff --name-only HEAD^ HEAD\` で変更ファイルを見る
 - 落ちたテストが期待する振る舞いに合わせて、変更されたコードの側を直す
 - 直し方が分からない、または大きな変更が必要なら、進捗メモに理由を書いて終了する（ランナーが差し戻す）
+- テスト同士が矛盾していて実装側では両立できないと判断した場合も、コードを変えずに進捗メモにその根拠を書いて終了する
 `,
   );
   writeFileSync(join(dir, 'PROGRESS.md'), '# 進捗メモ（fix ループ）\n\n');
@@ -343,7 +350,9 @@ async function main() {
   // 完了済みタスクの検証コマンドを累積した回帰検証
   const regressionCommands = (wave, extraIds = []) => {
     const done = state.waves.flatMap((w) => Object.entries(w.done).filter(([, d]) => d).map(([id]) => id));
-    return wave.verify ? [wave.verify] : [...new Set([...cfg.regressionTasks, ...done, ...extraIds].map(taskVerifyCommand).filter(Boolean))];
+    return wave.verify
+      ? [wave.verify]
+      : [...new Set([...cfg.regressionCommands, ...[...cfg.regressionTasks, ...done, ...extraIds].map(taskVerifyCommand).filter(Boolean)])];
   };
   // fix が保護パス（既定 test/）を変更していないか。変更していたら「テストを弱めて通した」とみなす
   const fixTouchedProtected = () => {
@@ -356,7 +365,7 @@ async function main() {
   const tryFix = ({ label, title, situation, commands, failed, baseTaskId }) => {
     const dir = join(runDir, `fix-${label}`);
     log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで）→ ${dir}`);
-    const fx = runFixLoop({ cfg, dir, label, title, situation, failed, baseTaskId, agent: args.agent });
+    const fx = runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseTaskId, agent: args.agent });
     state.totalCostUsd += fx.costUsd;
     const protectedChanged = fixTouchedProtected();
     let again = runCommands(commands, cfg);
@@ -370,6 +379,26 @@ async function main() {
     log(`  fix ループ ${fx.status}（${fx.iterations} 反復、$${fx.costUsd.toFixed(4)}）→ 再検証 ${again.ok ? 'PASS' : 'FAIL'}${protectedChanged ? '（保護パス test/ を変更したため無効）' : ''}`);
     return { ok: again.ok, record, again };
   };
+
+  // 0. ベースライン検証: 回帰検証に含める既存の検証が、マージ前の HEAD で通っているか。
+  //    通っていないなら「マージが壊した」と「最初から壊れていた」を区別できないので、ここで止める
+  //    （本物の fix エージェントが「マージ前に回帰が通っていたか先に確認すべき」と申し送りしてきたことから追加）
+  const baselineCommands = [...new Set([...cfg.regressionCommands, ...cfg.regressionTasks.map(taskVerifyCommand).filter(Boolean)])];
+  if (baselineCommands.length > 0) {
+    const b = runCommands(baselineCommands, cfg);
+    writeFileSync(join(runDir, 'baseline.txt'), formatResults(b.results));
+    state.baseline = { ok: b.ok, commands: b.results.map(({ command, ok }) => ({ command, ok })) };
+    log(`ベースライン検証 ${b.ok ? 'PASS' : 'FAIL'}（${baselineCommands.length} コマンド）`);
+    if (!b.ok) {
+      console.log(tail(b.failed.output, cfg.verify.tailLines));
+      state.status = 'baseline_failed';
+      state.finishedAt = new Date().toISOString();
+      save();
+      rmSync(wtBase, { recursive: true, force: true });
+      log(`終了: ベースライン検証 FAIL（マージ前から既存の検証が落ちている。タスクを回す前に直すこと）  概要=${summaryPath}`);
+      process.exit(1);
+    }
+  }
 
   outer: for (const [wi, wave] of cfg.waves.entries()) {
     const waveState = { name: wave.name, rounds: [], done: {} };

@@ -4,7 +4,7 @@
   "progressFile": "./PROGRESS.md",
   "runsDir": "../../runs/textkit-07-truncate-words",
   "verify": {
-    "command": "node --test test/truncate-words.test.mjs",
+    "command": "node --test test-experiments/truncate-words.test.mjs",
     "tailLines": 80,
     "timeoutSec": 300
   },

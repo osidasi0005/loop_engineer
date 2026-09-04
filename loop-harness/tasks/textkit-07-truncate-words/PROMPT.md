@@ -4,7 +4,7 @@
 
 ## 完了条件（すべて満たすこと）
 
-1. `node --test test/truncate-words.test.mjs` が PASS する
+1. `node --test test-experiments/truncate-words.test.mjs` が PASS する
 2. 依存パッケージを追加しない
 3. `test/` と `src/contract.mjs` を変更しない
 4. export 関数に 1〜3 行の JSDoc がある
