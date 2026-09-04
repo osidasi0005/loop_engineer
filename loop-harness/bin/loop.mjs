@@ -10,6 +10,7 @@
 //
 // 使い方:  node bin/loop.mjs [--task <名前> | --config <path>] [--max N] [--budget USD]
 //                            [--agent "コマンド文字列"] [--commit | --no-commit] [--verify-only]
+//                            [--priority normal|below-normal|low]
 //
 // タスクは tasks/<名前>/loop.config.json で定義する。--task も --config も省略した場合、
 // tasks/ にタスクが 1 つだけならそれを使う。
@@ -20,6 +21,7 @@ import { resolve, dirname, join, isAbsolute, relative, basename } from 'node:pat
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { extractSpecIssues, groupSpecIssues, printSpecIssues } from './lib/spec-issues.mjs';
+import { applyPriority, normalizePriority, PRIORITY_NAMES } from './lib/priority.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -43,6 +45,7 @@ function parseArgs(argv) {
     else if (a === '--no-commit') out.overrides.autoCommit = false;
     else if (a === '--worktree') out.overrides.worktree = resolve(next());
     else if (a === '--run-dir') out.overrides.runDir = resolve(next());
+    else if (a === '--priority') out.overrides.priority = next();
     else if (a === '--verify-only') out.verifyOnly = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else fail(`不明な引数: ${a}`);
@@ -67,6 +70,8 @@ function usage() {
   --worktree <dir>  作業対象を含むリポジトリのトップレベルを <dir>（git worktree）に差し替える
                     targetDir と progressFile を worktree 内の同じ相対位置へ写す（wave.mjs が使う）
   --run-dir <dir>   ログの出力先を指定する（既定は runsDir/<日時>）
+  --priority <lvl>  ランナーと内側のエージェント・検証コマンドの OS 優先度（normal / below-normal / low。既定 normal）
+                    PC の他の作業を優先させたいときに下げる。設定の priority を上書きする
   --verify-only     検証コマンドだけ実行して終了
 
 登録済みタスク: ${listTasks().join(', ') || '(なし)'}
@@ -123,6 +128,10 @@ function loadConfig(path, overrides) {
     ...cfg.loop,
   };
   cfg.git = { autoCommit: false, subjectPrefix: 'loop', ...cfg.git };
+  // priority: ランナー自身の OS 優先度（子プロセスが引き継ぐ）。並列で回すときの CPU 逼迫を和らげる
+  cfg.priority = overrides.priority ?? cfg.priority ?? 'normal';
+  if (!normalizePriority(cfg.priority)) fail(`priority が不正です: ${cfg.priority}（${PRIORITY_NAMES.join(' / ')}）`);
+  cfg.priority = normalizePriority(cfg.priority);
   cfg.taskName = cfg.taskName ?? base.split(/[\\/]/).filter(Boolean).at(-1);
   if (Number.isFinite(overrides.maxIterations)) cfg.loop.maxIterations = overrides.maxIterations;
   if (Number.isFinite(overrides.maxCostUsd)) cfg.loop.maxCostUsd = overrides.maxCostUsd;
@@ -539,6 +548,8 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return usage();
   const cfg = loadConfig(resolveConfigPath(args), args.overrides);
+  const prio = applyPriority(cfg.priority);
+  if (prio.error) fail(`優先度を設定できません: ${prio.error}`);
 
   if (args.verifyOnly) {
     const v = runVerify(cfg);
@@ -569,6 +580,7 @@ function main() {
 
   console.log(`[loop] 開始  対象=${cfg.targetDir}  最大${cfg.loop.maxIterations}回  予算$${cfg.loop.maxCostUsd}  ログ=${runDir}`);
   if (isClaudeAgent(cfg.agent)) console.log(`[loop] 内側のエージェントの git: ${cfg.agent.allowGit ? '許可（agent.allowGit）' : '禁止（--disallowedTools）'}`);
+  if (prio.changed) console.log(`[loop] OS 優先度: ${prio.name}（内側のエージェントと検証コマンドも同じ優先度で走る）`);
 
   // 0. 環境準備（反復 1 の前に 1 回だけ）。失敗したらループを始めない
   if (cfg.setup.command) {
