@@ -1,4 +1,5 @@
-import { MAX_SLUG_LENGTH } from './contract.mjs';
+/** スラッグの最大文字数（slugify 固有のため、このモジュールに置く） */
+const MAX_SLUG_LENGTH = 50;
 
 /**
  * 文字列を URL スラッグに変換する（小文字化・結合文字除去・英数字以外の連続をハイフン 1 つに）。
