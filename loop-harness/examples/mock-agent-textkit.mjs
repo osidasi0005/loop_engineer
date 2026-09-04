@@ -67,14 +67,19 @@ const impl = {
   'textkit-02-slugify': () => {
     write(
       'src/slugify.mjs',
-      `/** 文字列を URL スラッグに変換する（小文字化・アクセント除去・非英数字をハイフンに） */
+      `/** スラッグの最大文字数（slugify 固有のため、このモジュールに置く） */
+const MAX_SLUG_LENGTH = 50;
+
+/** 文字列を URL スラッグに変換する（小文字化・アクセント除去・非英数字をハイフンに）。50 文字を超えたら切り詰め、末尾のハイフンを除く */
 export function slugify(text) {
   return text
     .normalize('NFD')
     .replace(/[\\u0300-\\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_SLUG_LENGTH)
+    .replace(/-+$/, '');
 }
 `,
     );
