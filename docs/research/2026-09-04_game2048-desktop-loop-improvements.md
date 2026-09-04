@@ -224,12 +224,13 @@ wave ランナーの spec-issue 集約（項目 5）の本物での確認: `text
 - タスク 06 はラウンド 1・2 とも 2 反復（起動 1 回）。ラウンド 2 は差し戻しメモに全失敗と fix の申告が載っていたので、反復 1 で 3 か所の矛盾を 1 件にまとめて指摘した
 - 同じ結末（差し戻し 2 回で人に返す）に、費用・時間とも改善前の約半分で到達した
 
-## 次の改善候補（3 回目の再実行で見えたもの）
+## 次の改善候補（3 回目の再実行で見えたもの）→ 同日に実装
 
-- **fix ループの進捗メモにエージェントが書けない。** fix の `PROGRESS.md` は `runs/<日時>/fix-<label>/` にあり、エージェントの作業ディレクトリ
-  （`examples/textkit`）の外なので、`--permission-mode acceptEdits` では書き込みが拒否される（2 本の fix エージェントが spec-issue で報告。
-  内容は最終メッセージに全文書いてくれたので記録は残った）。以前の実行では書けていたので、拒否されるかどうかは安定していない。
-  `loop.mjs` が `progressFile` の親が `targetDir` の外にあるとき `--add-dir <その親>` を `claude` の引数に足せば済む（小）
+| # | 改善 | 実装 | 確認 |
+|---|---|---|---|
+| 11 | 進捗メモへの書き込み許可 | fix の `PROGRESS.md` は `runs/<日時>/fix-<label>/` にあり、エージェントの作業ディレクトリ（`examples/textkit`）の外なので、`--permission-mode acceptEdits` では書き込みが拒否されることがある（2 本の fix エージェントが spec-issue で報告。内容は最終メッセージに全文書いてくれたので記録は残った。以前の実行では書けていたので安定していない）。`loop.mjs` が `progressFile` の親が `targetDir` の外にあるとき `claude` の引数に `--add-dir <その親>` を足す。既に `--add-dir` があればその並びに足す。worktree への写しの後に計算する | 偽 claude で 3 ケース: 外にある → 末尾に `--add-dir <親>`、`targetDir` 内 → 付かない、既存の `--add-dir C:\other` あり → その並びに足される |
+
+本物の Claude での確認はしていない（次に wave を回したとき、fix の `PROGRESS.md` にエージェントの反復ブロックが入るかを見る）
 
 モック wave の確認で分かったこと: `examples/textkit` の `test/index.test.mjs` は後のタスク（09 slug-length）の期待を含むようになったので、
 未実装の textkit からモックで回すと 05-index がスタックする（モックの `index.mjs` が古い）。実装済みの textkit で回す `npm run wave` は
