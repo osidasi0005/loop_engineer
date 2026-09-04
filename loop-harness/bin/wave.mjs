@@ -11,6 +11,8 @@
 //     4. マージのたびに回帰検証（これまでに完了した全タスクの検証コマンドを累積で実行）
 //          PASS → そのまま
 //          FAIL → 第 1 段: ランナーが fix タスクを生成し、狭い権限・小さい予算の loop.mjs を本体上で回す。通れば fix をコミット
+//                 （回帰検証は全コマンドを独立に実行し、落ちたもの全部を fix の仕様に渡す。fix エージェントが
+//                   <blocked> で「実装側では直せない」と申告したら loop.mjs が即停止する）
 //                 第 2 段: fix でも通らなければ、そのマージだけを取り消し（reset --hard HEAD^）、失敗出力を進捗メモに添えて差し戻す
 //     5. 未完了タスク（未達 / 衝突 / 差し戻し）は worktree の PROGRESS.md だけを取り込む（コードは捨てて記憶だけ残す）
 //     6. 未完了が残れば次ラウンド（maxRounds まで）、無ければ次の Wave
@@ -29,6 +31,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, appendFileS
 import { resolve, dirname, join, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { groupSpecIssues, printSpecIssues, oneLine } from './lib/spec-issues.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -170,17 +173,14 @@ function runShell(command, { cwd, timeoutSec }) {
   return { ok: r.status === 0 && !r.error, code: r.status, ms: Date.now() - started, output: combined.trim() };
 }
 
-// 複数の検証コマンドを順に実行し、最初の失敗で止まる
+// 複数の検証コマンドをすべて独立に実行する（最初の失敗で止めない）。
+// 以前は先頭の失敗で止めていたため、fix ループの仕様に「落ちているのはこれだけ。他は PASS」と書いたものが
+// 事実と異なることがあった（textkit-revert の本物の fix エージェントが指摘）。全部回して全部見せる
 function runCommands(commands, cfg) {
-  const results = [];
-  for (const command of commands) {
-    const v = runShell(command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec });
-    results.push({ command, ...v });
-    if (!v.ok) break;
-  }
+  const results = commands.map((command) => ({ command, ...runShell(command, { cwd: cfg.repoDir, timeoutSec: cfg.verify.timeoutSec }) }));
   const ok = results.every((r) => r.ok);
-  const failed = results.find((r) => !r.ok) ?? null;
-  return { ok, results, failed };
+  const failures = results.filter((r) => !r.ok);
+  return { ok, results, failed: failures[0] ?? null, failures };
 }
 const formatResults = (results) =>
   results.map((r) => `$ ${r.command}\nexit ${r.code} / ${r.ms}ms\n\n${r.output}\n`).join('\n' + '='.repeat(60) + '\n');
@@ -226,10 +226,12 @@ function runLoop({ id, worktree, runDir, agent }) {
 // ---------- fix ループ（回帰・統合検証が落ちたときの第 1 段） ----------
 // ランナーが fix タスク（設定・仕様・進捗メモ）を runs/ 配下に生成し、本体チェックアウト上で loop.mjs を回す。
 // 権限を狭め、反復と予算を絞る。通ったかどうかは呼び出し側がもう一度検証して決める（fix の自己申告は使わない）。
-function runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseTaskId, agent }) {
+function runFixLoop({ cfg, dir, label, title, situation, commands, failures, baseTaskId, agent }) {
   // fix ループ自身の検証はランナーの再検証と同じ全コマンド。落ちた 1 つだけにすると
-  // 「それだけ通して完了宣言 → 再検証で別のコマンドが落ちる」になる（本物のエージェントで観察した）
-  const verifyCommand = commands.join(' && ');
+  // 「それだけ通して完了宣言 → 再検証で別のコマンドが落ちる」になる（本物のエージェントで観察した）。
+  // 配列で渡し、loop.mjs が各コマンドを独立に実行して全部の結果を見せる（`&&` 連結だと先頭で止まる）
+  const failedCommands = new Set(failures.map((f) => f.command));
+  const passing = commands.filter((c) => !failedCommands.has(c));
   mkdirSync(dir, { recursive: true });
   const baseAgent = baseTaskId ? readTaskConfig(baseTaskId).agent : null;
   const agentCfg = baseAgent
@@ -241,7 +243,7 @@ function runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseT
     promptFile: join(dir, 'PROMPT.md'),
     progressFile: join(dir, 'PROGRESS.md'),
     runsDir: dir,
-    verify: { command: verifyCommand, tailLines: cfg.verify.tailLines, timeoutSec: cfg.verify.timeoutSec },
+    verify: { command: commands, tailLines: cfg.verify.tailLines, timeoutSec: cfg.verify.timeoutSec },
     git: { autoCommit: false },
     agent: agentCfg,
     loop: { maxIterations: cfg.fix.maxIterations, maxCostUsd: cfg.fix.maxCostUsd, stuckWarnAfter: 1, stuckStopAfter: 2 },
@@ -255,24 +257,24 @@ ${situation}
 
 ## 完了条件（すべて満たすこと）
 
-1. 次の検証がすべて PASS する（落ちているのは \`${failed.command}\`。他は現在 PASS しており、壊さないこと）
-   \`${verifyCommand}\`
+1. 次の検証コマンドがすべて PASS する（それぞれ独立に実行される。すべて exit 0 で PASS）
+${commands.map((c) => `   - \`${c}\`${failedCommands.has(c) ? '  ← 現在 FAIL' : '  （現在 PASS。壊さないこと）'}`).join('\n')}
+   落ちているのは ${failures.length} 本${passing.length ? `、残り ${passing.length} 本は現在 PASS` : ''}
 2. \`test/\` を変更しない。テストを弱めたり削除したりしない
 3. 新しいファイルを作らない。既存ファイルの最小限の修正で直す
 4. export 名やシグネチャ（他モジュールとの契約）を変えない
 
 ## 落ちた検証の出力
 
-\`\`\`
-${tail(failed.output, cfg.verify.tailLines)}
-\`\`\`
+${failures.map((f) => `### \`${f.command}\`（exit ${f.code ?? 'n/a'}）\n\`\`\`\n${tail(f.output, Math.max(20, Math.floor(cfg.verify.tailLines / failures.length)))}\n\`\`\``).join('\n\n')}
 
 ## 方針
 
 - まず「直近のマージで何が変わったか」を疑う。\`git diff --name-only HEAD^ HEAD\` で変更ファイルを見る
 - 落ちたテストが期待する振る舞いに合わせて、変更されたコードの側を直す
 - 直し方が分からない、または大きな変更が必要なら、進捗メモに理由を書いて終了する（ランナーが差し戻す）
-- テスト同士が矛盾していて実装側では両立できないと判断した場合も、コードを変えずに進捗メモにその根拠を書いて終了する
+- テスト同士が矛盾していて実装側では両立できないと判断した場合は、コードを変えずに進捗メモにその根拠を書き、
+  最終メッセージに <blocked>理由</blocked> を書いて終了する。ランナーは fix を打ち切って差し戻す（反復を重ねても同じ結論になるため）
 `,
   );
   writeFileSync(join(dir, 'PROGRESS.md'), '# 進捗メモ（fix ループ）\n\n');
@@ -286,7 +288,13 @@ ${tail(failed.output, cfg.verify.tailLines)}
   } catch {
     // 起動前に失敗
   }
-  return { status: summary?.status ?? 'launch_failed', iterations: summary?.iteration ?? 0, costUsd: summary?.totalCostUsd ?? 0, specIssues: summary?.specIssues ?? [] };
+  return {
+    status: summary?.status ?? 'launch_failed',
+    iterations: summary?.iteration ?? 0,
+    costUsd: summary?.totalCostUsd ?? 0,
+    specIssues: summary?.specIssues ?? [],
+    blocked: summary?.blocked ?? null,
+  };
 }
 
 // タスクのエージェント引数を fix 用に狭める（--allowedTools と --max-turns を差し替え）
@@ -335,14 +343,14 @@ async function main() {
   log(`worktree=${wtBase}`);
   // specIssues: 各タスク（と fix ループ）のエージェントが <spec-issue> で報告した仕様の抜け・矛盾を集約する。
   // 差し戻しの多くは「仕様がテストと矛盾」が原因だったので、進捗メモに埋もれさせず終了時に列挙して人に返す
-  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [], fixes: [], specIssues: [] };
+  const state = { name: cfg.name, branch, startedAt: new Date().toISOString(), totalCostUsd: 0, status: 'running', waves: [], merges: [], fixes: [], specIssues: [], specIssueGroups: [] };
   const summaryPath = join(runDir, 'wave-summary.json');
   const save = () => writeFileSync(summaryPath, JSON.stringify(state, null, 2));
   const collectSpecIssues = (source, summary) => {
-    for (const s of summary?.specIssues ?? []) {
-      state.specIssues.push({ source, iteration: s.iteration, text: s.text });
-      log(`  ${source}: 仕様への指摘（反復 ${s.iteration}）: ${String(s.text).replace(/\s*\n\s*/g, ' ')}`);
-    }
+    const items = summary?.specIssues ?? [];
+    for (const s of items) state.specIssues.push({ source, iteration: s.iteration, text: s.text });
+    // 途中経過は件数だけ。全文は終了時にまとめて出す（同じ指摘の繰り返しが多いため）
+    if (items.length) log(`  ${source}: 仕様への指摘 ${items.length} 件（終了時にまとめて列挙）`);
   };
 
   const cleanup = (id, worktree) => {
@@ -370,20 +378,22 @@ async function main() {
     return changed || null;
   };
   // 回帰・統合検証が落ちたときの第 1 段: fix ループを回し、もう一度同じ検証で判定する
-  const tryFix = ({ label, title, situation, commands, failed, baseTaskId }) => {
+  const tryFix = ({ label, title, situation, commands, failures, baseTaskId }) => {
     const dir = join(runDir, `fix-${label}`);
-    log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで）→ ${dir}`);
-    const fx = runFixLoop({ cfg, dir, label, title, situation, commands, failed, baseTaskId, agent: args.agent });
+    log(`  fix ループ起動（${cfg.fix.maxIterations} 反復・$${cfg.fix.maxCostUsd} まで、落ちているのは ${failures.length}/${commands.length} 本）→ ${dir}`);
+    const fx = runFixLoop({ cfg, dir, label, title, situation, commands, failures, baseTaskId, agent: args.agent });
     state.totalCostUsd += fx.costUsd;
     collectSpecIssues(`fix-${label}`, fx);
+    if (fx.blocked) log(`  fix-${label}: エージェントが「実装側では直せない」と申告（反復 ${fx.blocked.iteration}）: ${oneLine(fx.blocked.reason, 300)}`);
     const protectedChanged = fixTouchedProtected();
     let again = runCommands(commands, cfg);
     writeFileSync(join(dir, 'recheck.txt'), (protectedChanged ? `保護パスが変更された:\n${protectedChanged}\n\n` : '') + formatResults(again.results));
     if (protectedChanged) {
       // テストを弱めて通した可能性があるので、検証結果にかかわらず fix は無効
-      again = { ...again, ok: false, failed: again.failed ?? { command: '(保護パスの変更)', output: protectedChanged } };
+      const guard = { command: '(保護パスの変更)', output: protectedChanged };
+      again = { ...again, ok: false, failed: again.failed ?? guard, failures: again.failures.length ? again.failures : [guard] };
     }
-    const record = { label, fixStatus: fx.status, iterations: fx.iterations, costUsd: fx.costUsd, recheckOk: again.ok, protectedChanged: Boolean(protectedChanged) };
+    const record = { label, fixStatus: fx.status, iterations: fx.iterations, costUsd: fx.costUsd, recheckOk: again.ok, protectedChanged: Boolean(protectedChanged), blocked: fx.blocked };
     state.fixes.push(record);
     log(`  fix ループ ${fx.status}（${fx.iterations} 反復、$${fx.costUsd.toFixed(4)}）→ 再検証 ${again.ok ? 'PASS' : 'FAIL'}${protectedChanged ? '（保護パス test/ を変更したため無効）' : ''}`);
     return { ok: again.ok, record, again };
@@ -491,7 +501,7 @@ async function main() {
                 title: `${r.id} のマージ後に回帰検証が失敗`,
                 situation: `Wave「${wave.name}」でタスク ${r.id} をマージした直後、これまでに完了したタスクの検証を回帰させたところ失敗した。\n作業ディレクトリは本体チェックアウト（マージ済みの状態）。直近のマージ ${mergeCommit} が原因の可能性が高い。`,
                 commands,
-                failed: reg.failed,
+                failures: reg.failures,
                 baseTaskId: r.id,
               });
               if (fx.ok) {
@@ -515,9 +525,11 @@ async function main() {
               git(['reset', '-q', '--hard', 'HEAD^'], toplevel);
               t.merge = 'reverted';
               t.detail = tail(reg.failed.output, 12);
+              const failedList = reg.failures.map((f) => `\`${f.command}\``).join(' / ');
+              const failedOutputs = reg.failures.map((f) => `$ ${f.command}\n${tail(f.output, Math.max(12, Math.floor(30 / reg.failures.length)))}`).join('\n\n');
               failureNote = `### ランナー: ラウンド ${round} のマージは回帰検証で差し戻し\n` +
-                `マージ後に \`${reg.failed.command}\` が失敗した${cfg.fix.enabled ? '（fix ループでも直らなかった）' : ''}。マージは取り消され、コードは破棄された。\n` +
-                `次の実行では、他のタスクが担当するファイルや契約（共有定数・interface）を変更していないかを最初に確認すること。\n\`\`\`\n${tail(reg.failed.output, 30)}\n\`\`\`\n`;
+                `マージ後に ${failedList} が失敗した（${reg.failures.length}/${commands.length} 本）${cfg.fix.enabled ? `（fix ループでも直らなかった${t.fix?.blocked ? '。fix エージェントは「実装側では直せない」と申告' : ''}）` : ''}。マージは取り消され、コードは破棄された。\n` +
+                `次の実行では、他のタスクが担当するファイルや契約（共有定数・interface）を変更していないかを最初に確認すること。\n\`\`\`\n${failedOutputs}\n\`\`\`\n`;
               log(`  ${r.id}: 回帰検証 FAIL のためマージを取り消し → 次ラウンドで再実行`);
             }
           }
@@ -570,7 +582,7 @@ async function main() {
         title: '全 Wave 終了後の統合検証が失敗',
         situation: `全 Wave のタスクをマージし終えた状態で、全体の検証コマンドを実行したところ失敗した。作業ディレクトリは本体チェックアウト。`,
         commands: [cfg.verify.command],
-        failed: v.failed,
+        failures: v.failures,
         baseTaskId: cfg.waves.at(-1).tasks.at(-1),
       });
       if (fx.ok) {
@@ -597,10 +609,9 @@ async function main() {
     max_rounds: 'ラウンド上限（未完了タスクあり）',
     worktree_failed: 'worktree 作成失敗（環境の問題。--worktree-base で短いパスを指定するなど）',
   }[state.status];
-  if (state.specIssues.length) {
-    log(`仕様への指摘 ${state.specIssues.length} 件（エージェントが <spec-issue> で報告。仕様を見直してから再実行する）:`);
-    for (const s of state.specIssues) log(`  - [${s.source} 反復 ${s.iteration}] ${String(s.text).replace(/\s*\n\s*/g, ' ')}`);
-  }
+  state.specIssueGroups = groupSpecIssues(state.specIssues).map(({ refs, count, sources, text }) => ({ refs, count, sources, text }));
+  save();
+  printSpecIssues(state.specIssues, log, { fullPath: summaryPath });
   log(`終了: ${label}  マージ${state.merges.length}件  fix ${state.fixes.length}回  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
 }

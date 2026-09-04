@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync, rea
 import { resolve, dirname, join, isAbsolute, relative, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { extractSpecIssues, groupSpecIssues, printSpecIssues } from './lib/spec-issues.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -104,6 +105,10 @@ function loadConfig(path, overrides) {
   cfg.runsDir = abs(cfg.runsDir ?? 'runs');
   cfg.verify = { tailLines: 60, timeoutSec: 300, artifacts: [], ...cfg.verify };
   if (typeof cfg.verify.artifacts === 'string') cfg.verify.artifacts = [cfg.verify.artifacts];
+  // verify.command は文字列 1 つか配列。配列なら各コマンドを独立に実行し、全部の結果を見せる
+  // （`a && b` のように連結すると先頭の失敗で止まり、後続の失敗が見えない。fix ループの本物のエージェントが指摘した）
+  cfg.verify.commands = (Array.isArray(cfg.verify.command) ? cfg.verify.command : [cfg.verify.command]).filter(Boolean);
+  cfg.verify.label = cfg.verify.commands.length > 1 ? cfg.verify.commands.map((c) => `\`${c}\``).join(' / ') : `\`${cfg.verify.commands[0] ?? ''}\``;
   // setup: 反復 1 の前に 1 回だけ実行する環境準備（npm install など）。失敗したらループを始めない
   cfg.setup = { command: null, timeoutSec: 900, ...cfg.setup };
   cfg.agent = { command: 'claude', args: ['-p', '--output-format', 'json'], timeoutSec: 1800, allowGit: false, ...cfg.agent };
@@ -113,6 +118,8 @@ function loadConfig(path, overrides) {
     stuckWarnAfter: 2,
     stuckStopAfter: 4,
     doneMarker: '<promise>COMPLETE</promise>',
+    // エージェントが「自分の権限では直せない」と申告するタグ。理由を囲んで書く。ランナーはループを止めて人間に返す
+    blockedTag: 'blocked',
     ...cfg.loop,
   };
   cfg.git = { autoCommit: false, subjectPrefix: 'loop', ...cfg.git };
@@ -125,7 +132,7 @@ function loadConfig(path, overrides) {
     cfg.agent = { ...cfg.agent, command: overrides.agentCommand, args: [] };
   }
   if (isClaudeAgent(cfg.agent) && !cfg.agent.allowGit) cfg.agent.args = withGitDisallowed(cfg.agent.args);
-  if (!cfg.verify.command) fail('verify.command が設定されていません');
+  if (!cfg.verify.commands.length) fail('verify.command が設定されていません');
   if (!existsSync(cfg.promptFile)) fail(`仕様ファイルがありません: ${cfg.promptFile}`);
   if (!existsSync(cfg.targetDir)) fail(`対象ディレクトリがありません: ${cfg.targetDir}`);
   if (overrides.worktree) remapIntoWorktree(cfg, overrides.worktree);
@@ -206,16 +213,30 @@ function runShell(command, { cwd, input, timeoutSec, env }) {
 
 // ---------- 検証 ----------
 function runVerify(cfg) {
-  const r = runShell(cfg.verify.command, { cwd: cfg.targetDir, timeoutSec: cfg.verify.timeoutSec });
-  const combined = [r.stdout, r.stderr].filter(Boolean).join('\n');
-  const ok = r.code === 0 && !r.timedOut && !r.error;
+  // 複数コマンドは独立に全部実行する（先頭が落ちても後続を回す）。PASS は全部 exit 0 のとき
+  const results = cfg.verify.commands.map((command) => {
+    const r = runShell(command, { cwd: cfg.targetDir, timeoutSec: cfg.verify.timeoutSec });
+    const combined = [r.stdout, r.stderr].filter(Boolean).join('\n').trim();
+    return { command, ok: r.code === 0 && !r.timedOut && !r.error, code: r.code, timedOut: r.timedOut, error: r.error, ms: r.ms, output: combined };
+  });
+  const multi = results.length > 1;
+  const combined = multi
+    ? results.map((r) => `$ ${r.command}\n[${r.ok ? 'PASS' : 'FAIL'} exit ${r.code ?? 'n/a'}${r.timedOut ? ' timeout' : ''}]\n${r.output}`).join('\n\n')
+    : results[0].output;
+  const firstFail = results.find((r) => !r.ok) ?? null;
+  // 複数のときは各コマンドの末尾を残す（1 つの末尾だけ切ると先頭のコマンドの結果が消える）
+  const per = Math.max(10, Math.floor(cfg.verify.tailLines / results.length));
+  const output = multi
+    ? results.map((r) => `$ ${r.command}\n[${r.ok ? 'PASS' : 'FAIL'} exit ${r.code ?? 'n/a'}${r.timedOut ? ' timeout' : ''}]\n${tail(r.output, per)}`).join('\n\n')
+    : tail(combined, cfg.verify.tailLines);
   return {
-    ok,
-    code: r.code,
-    timedOut: r.timedOut,
-    error: r.error,
-    ms: r.ms,
-    output: tail(combined.trim(), cfg.verify.tailLines),
+    ok: !firstFail,
+    code: firstFail ? firstFail.code : 0,
+    timedOut: results.some((r) => r.timedOut),
+    error: firstFail?.error ?? null,
+    ms: results.reduce((s, r) => s + r.ms, 0),
+    output,
+    failed: results.filter((r) => !r.ok).map((r) => r.command),
     // 経過時間などの数値の揺らぎを除いてハッシュ化（スタック検知用）
     hash: sha(combined.replace(/\d+(\.\d+)?/g, '#').replace(/\s+/g, ' ')),
   };
@@ -288,7 +309,8 @@ function buildPrompt(cfg, state, verify) {
 - 失敗の原因を仮説として進捗メモに書き出してから、
 - これまでと異なる方法で直してください。
 失敗の原因がコードではなく環境（依存パッケージの欠落、権限、ネットワーク、外部ツールの不在）にあると判断したら、
-無理に回避せず、進捗メモにその根拠を書いて終了してください。環境の問題は人間が直します。
+無理に回避せず、進捗メモにその根拠を書き、最終メッセージに <${cfg.loop.blockedTag}>理由</${cfg.loop.blockedTag}> を書いて終了してください。
+ランナーはループを止めて人間に返します。環境の問題は人間が直します。
 あと ${cfg.loop.stuckStopAfter - state.sameFailureCount} 回同じ失敗が続くとループは停止します。
 `;
   }
@@ -299,7 +321,7 @@ function buildPrompt(cfg, state, verify) {
   // FAIL 起点でも、エージェントが自分で検証を回して PASS し、完了条件を全部確認したなら宣言してよい。
   // 完了判定は次の反復でランナーが検証して行うので、「宣言だけの反復」を 1 回分省ける（費用 約 3 割減）。
   const rulesFail = `検証が失敗しています。失敗を直すための最も重要な 1 つの作業に集中してください。
-直した後、検証コマンド \`${cfg.verify.command}\` を自分で実行して PASS し、さらに仕様の完了条件を 1 つずつ確認して
+直した後、検証コマンド ${cfg.verify.label} を自分で実行して PASS し、さらに仕様の完了条件を 1 つずつ確認して
 すべて満たしていれば、最終メッセージの末尾に ${cfg.loop.doneMarker} と書いてよいです（次の反復でランナーが検証して確定します）。
 自分で検証していない、または満たしていない条件があるなら、マーカーは書かないでください。`;
 
@@ -315,7 +337,7 @@ ${spec}
 ## 進捗メモ（${cfg.progressFile}）
 ${progress}
 
-## 直前の検証結果（コマンド: \`${cfg.verify.command}\`）
+## 直前の検証結果（コマンド: ${cfg.verify.label}${cfg.verify.commands.length > 1 ? '。それぞれ独立に実行し、すべて exit 0 で PASS' : ''}）
 ${verifyBlock}
 ${stuckBlock}
 ## この反復のルール
@@ -326,14 +348,16 @@ ${stuckBlock}
 4. 検証コマンドは自分で実行してもよいが、最終判断はランナーの検証結果に従う。
 5. 仕様の抜け・曖昧さ・テストとの矛盾に気づいたら、最終メッセージに <spec-issue>…</spec-issue> で囲んで 1 件ずつ書く
    （どこが・なぜ・どう解釈して進めたか）。ランナーが拾って人間に見せる。仕様やテストは変えない。
+6. 自分の権限では直せない原因で先に進めない（環境の問題、テスト同士の矛盾、仕様と変更禁止のファイルの矛盾）と判断したら、
+   コードを変えずに進捗メモに根拠を書き、最終メッセージに <${cfg.loop.blockedTag}>理由</${cfg.loop.blockedTag}> を書いて終了する。
+   ランナーはループを止めて人間に返す。直せるものを直さずに使わないこと。
 `;
 }
 
-// 応答から <spec-issue>…</spec-issue> を抜き出す（項目 5: 仕様の穴の指摘を進捗メモに埋もれさせない）
-function extractSpecIssues(text) {
-  return [...String(text ?? '').matchAll(/<spec-issue>([\s\S]*?)<\/spec-issue>/g)]
-    .map((m) => m[1].trim())
-    .filter(Boolean);
+// 応答から <blocked>理由</blocked> を抜き出す（エージェントが「自分では直せない」と申告した）
+function extractBlocked(text, tag) {
+  const m = String(text ?? '').match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+  return m ? m[1].trim() : null;
 }
 
 // ---------- エージェント ----------
@@ -517,6 +541,8 @@ function main() {
     status: 'running',
     iterations: [],
     specIssues: [], // エージェントが <spec-issue> で報告した仕様の抜け・矛盾（{ iteration, text }）
+    specIssueGroups: [], // 同じ場所への指摘をまとめたもの（終了時に作る）
+    blocked: null, // エージェントが <blocked> で申告した「自分では直せない理由」（{ iteration, reason }）
     setup: null,
   };
   const summaryPath = join(runDir, 'summary.json');
@@ -588,6 +614,8 @@ function main() {
     state.agentSaidDone = agent.result.includes(cfg.loop.doneMarker);
     const specIssues = extractSpecIssues(agent.result);
     for (const text of specIssues) state.specIssues.push({ iteration: n, text });
+    const blockedReason = extractBlocked(agent.result, cfg.loop.blockedTag);
+    if (blockedReason && !state.agentSaidDone) state.blocked = { iteration: n, reason: blockedReason };
     const logFile = writeIterationLog(runDir, n, { prompt, verify, agent, artifacts, specIssues });
     appendFileSync(
       cfg.progressFile,
@@ -621,6 +649,13 @@ function main() {
       console.log(`[${n}] エージェントがエラー終了。${agent.timedOut ? 'タイムアウト。' : ''}${tail(agent.stderr.trim(), 5)}`);
       break;
     }
+    if (state.blocked) {
+      // エージェントが「自分の権限では直せない」と申告した。反復を重ねても同じ結論になるので止めて人間に返す
+      // （textkit-revert の本物の実行では、fix ループが 2 反復とも同じ診断をして予算上限で止まっていた）
+      state.status = 'blocked';
+      console.log(`[${n}] エージェントが「自分では直せない」と申告。ループを止めて人間に返します。\n    理由: ${state.blocked.reason.replace(/\s*\n\s*/g, ' ')}`);
+      break;
+    }
     if (state.totalCostUsd > cfg.loop.maxCostUsd) {
       state.status = 'budget_exceeded';
       console.log(`[${n}] 予算超過 $${state.totalCostUsd.toFixed(4)} > $${cfg.loop.maxCostUsd}`);
@@ -641,14 +676,14 @@ function main() {
     agent_error: 'エージェントエラー',
     budget_exceeded: '予算超過',
     max_iterations: '最大反復回数に到達（未完了）',
+    blocked: 'エージェントが「自分では直せない」と申告（人間の判断待ち）',
   }[state.status];
   if (state.status === 'stuck') {
     console.log('[loop] 同じ失敗が続く原因が環境（依存パッケージ・権限・ネットワーク・外部ツール）にあるなら、ループでは直りません。人間が直してから再実行してください。');
   }
-  if (state.specIssues.length) {
-    console.log(`[loop] 仕様への指摘 ${state.specIssues.length} 件（エージェントが <spec-issue> で報告。仕様を見直してください）:`);
-    for (const s of state.specIssues) console.log(`  - [反復 ${s.iteration}] ${s.text.replace(/\s*\n\s*/g, ' ')}`);
-  }
+  state.specIssueGroups = groupSpecIssues(state.specIssues).map(({ refs, count, sources, text }) => ({ refs, count, sources, text }));
+  saveSummary();
+  printSpecIssues(state.specIssues, (line) => console.log(`[loop] ${line}`), { fullPath: summaryPath });
   console.log(`[loop] 終了: ${label}  反復${state.iteration}回  累計$${state.totalCostUsd.toFixed(4)}  概要=${summaryPath}`);
   process.exit(state.status === 'complete' ? 0 : 1);
 }

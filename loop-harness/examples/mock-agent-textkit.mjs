@@ -51,9 +51,14 @@ const impl = {
     write('src/contract.mjs', contractSource);
     return ['やったこと: src/contract.mjs に定数 3 つを定義', '次にやるべきこと: 検証が通ったら完了条件を確認'];
   },
-  // ランナーが生成した fix タスク。MOCK_BREAK=1 なら契約を戻して直す。=2 なら直せずに終わる（差し戻し経路の確認用）
+  // ランナーが生成した fix タスク。MOCK_BREAK=1 なら契約を戻して直す。=2 なら直せずに終わる（差し戻し経路の確認用）。
+  // =2 のときは本物の fix エージェントと同じく、仕様の矛盾を <spec-issue> で報告し、<blocked> で「実装側では直せない」と申告する
+  // （loop.mjs はこれで即停止し、fix の 2 反復目を回さない）
   fix: () => {
     if (breakMode === '2') {
+      extra =
+        '\n\n<spec-issue>test/contract.test.mjs:12 は WORD_SEPARATOR が /\\s+/ であることを要求し、textkit-04-truncate の仕様は単一スペースを要求している。同じ定数に別の値を求めており実装側では両立できない。</spec-issue>' +
+        '\n<blocked>test/contract.test.mjs:12 と textkit-04-truncate の仕様が同じ定数 WORD_SEPARATOR に別の値を要求しており、test/ 変更禁止の下では直せない。人間が契約を決める必要がある。</blocked>';
       return ['やったこと: 原因を調べたが、契約の変更が必要に見えるため修正しなかった', '次にやるべきこと: 差し戻して元タスクで直す'];
     }
     write('src/contract.mjs', contractSource);
@@ -146,12 +151,13 @@ export function summarize(text) {
 };
 
 let result;
+let extra = ''; // fix モックが <spec-issue> / <blocked> を足すための置き場
 if (verifyPassed) {
   note(['やったこと: 完了条件を確認（テスト PASS、依存なし、test/ 未変更、JSDoc あり）', '次にやるべきこと: なし']);
   result = `完了条件をすべて確認しました。\n\n${doneMarker}`;
 } else if (impl[taskId]) {
   note(impl[taskId]());
-  result = `${taskId} を実装しました。`;
+  result = `${taskId} を実装しました。${extra}`;
 } else {
   note([`分かったこと: タスク ${taskId} の実装を知らない（モックの対象外）`]);
   result = `モックはタスク ${taskId} を扱えません。`;
