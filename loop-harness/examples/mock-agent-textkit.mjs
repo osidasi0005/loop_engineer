@@ -10,6 +10,7 @@
 //   ランナーの fix ループが起動する。fix のモックは契約を元に戻す。
 //   MOCK_BREAK=2 は同じ破壊をするが fix のモックは何もしない → 差し戻し経路に入る。
 //   差し戻し後の再実行では、進捗メモに「差し戻し」の記録があるのを見て契約を壊さない。
+//   MOCK_BREAK=3 は =2 と同じだが、差し戻し後の再実行で 04 が <blocked> を申告する → wave は 04 を再実行せずに止める。
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs';
 
@@ -55,7 +56,7 @@ const impl = {
   // =2 のときは本物の fix エージェントと同じく、仕様の矛盾を <spec-issue> で報告し、<blocked> で「実装側では直せない」と申告する
   // （loop.mjs はこれで即停止し、fix の 2 反復目を回さない）
   fix: () => {
-    if (breakMode === '2') {
+    if (breakMode === '2' || breakMode === '3') {
       extra =
         '\n\n<spec-issue>test/contract.test.mjs:12 は WORD_SEPARATOR が /\\s+/ であることを要求し、textkit-04-truncate の仕様は単一スペースを要求している。同じ定数に別の値を求めており実装側では両立できない。</spec-issue>' +
         '\n<blocked>test/contract.test.mjs:12 と textkit-04-truncate の仕様が同じ定数 WORD_SEPARATOR に別の値を要求しており、test/ 変更禁止の下では直せない。人間が契約を決める必要がある。</blocked>';
@@ -127,6 +128,12 @@ export function truncate(text, max = TRUNCATE_DEFAULT_MAX) {
 `,
     );
     if (conflict) changelog('truncate を追加');
+    if (breakMode === '3' && wasReverted) {
+      // 差し戻された後、本物のエージェントがしたのと同じく「同じ変更の再投入はしない」と <blocked> で申告する
+      // （wave はこのタスクを再実行せずに止める）。コードは書かない
+      extra = '\n\n<blocked>ラウンド 1 で仕様どおり実装した結果が回帰検証で差し戻された。仕様（WORD_SEPARATOR を単一スペースに）と test/contract.test.mjs が矛盾しており、同じ変更を再投入しても同じ結果になる。人間が契約を決める必要がある。</blocked>';
+      return ['やったこと: 差し戻しの記録を読み、同じ変更は再投入しなかった', '次にやるべきこと: 人間が契約（WORD_SEPARATOR）を決める'];
+    }
     if (breakMode && !wasReverted) {
       // 契約を壊す（自分のテストには影響しない）。差し戻された後の再実行では壊さない
       write('src/contract.mjs', contractSource.replace('/\\s+/', '/ /'));
