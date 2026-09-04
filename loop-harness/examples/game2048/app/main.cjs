@@ -160,6 +160,16 @@ function setupSmoke(win, size) {
     app.exit(1);
   };
 
+  /**
+   * userData 直下に smoke.json を同期的に書く（内部ヘルパー）。
+   * @param {{ size: number, window: string, tiles: number, best: number, hud: string }} data
+   */
+  const writeSmokeJson = (data) => {
+    const file = path.join(app.getPath('userData'), 'smoke.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data));
+  };
+
   win.webContents.once('did-fail-load', (_event, errorCode, errorDescription) => {
     fail(`did-fail-load ${errorCode} ${errorDescription}`);
   });
@@ -180,6 +190,7 @@ function setupSmoke(win, size) {
         process.stdout.write(`SMOKE tiles=${tiles}\n`);
         process.stdout.write(`SMOKE best=${best}\n`);
         process.stdout.write(`SMOKE hud=${hud}\n`);
+        writeSmokeJson({ size, window: `${w}x${h}`, tiles, best, hud });
         app.exit(tiles === 16 ? 0 : 1);
       } catch (err) {
         fail(String(err && err.message ? err.message : err));

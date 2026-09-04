@@ -4,6 +4,7 @@
   "private": true,
   "description": "2048 — Windows デスクトップ版（Electron）",
   "main": "app/main.cjs",
+  "author": "osidasi0005",
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "start": "electron .",
@@ -12,5 +13,17 @@
   "devDependencies": {
     "electron": "^44.2.0",
     "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "jp.osidasi.game2048",
+    "productName": "2048",
+    "directories": { "output": "dist" },
+    "files": ["app/**/*", "src/**/*", "package.json"],
+    "win": {
+      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "artifactName": "2048.exe",
+      "signAndEditExecutable": false
+    },
+    "electronLanguages": ["en-US", "ja"]
   }
 }
