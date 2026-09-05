@@ -39,3 +39,22 @@
 - このタスクは完了。以後 `TRUNCATE_DEFAULT_MAX` / `ELLIPSIS` / `WORD_SEPARATOR` の名前・値は変更しない（後続タスクが `./contract.mjs` から import する）。
 
 - [ランナー] 反復 2: 検証 PASS → エージェント 7 ターン / $0.3545 / 完了宣言あり
+
+### 反復 1
+
+やったこと:
+- コード変更なし。完了条件 4 つを確認しただけ。
+  1. 検証 `node --test test/contract.test.mjs` はランナー結果で PASS（3 pass / 0 fail, exit 0）。
+  2. 依存追加なし（`package.json` / `node_modules` はリポジトリに存在しない）。
+  3. `test/` 未変更（`test/contract.test.mjs` の内容は当初のまま。`src/contract.mjs` 以外は触っていない）。
+  4. 3 つの export すべてに 1 行 JSDoc あり（`src/contract.mjs` 1〜8 行目）。
+- 最終メッセージに完了マーカーを記載。
+
+分かったこと:
+- この環境では Bash / PowerShell の実行許可が下りず、`git status` や `node --test` を自分で実行できなかった。判断はランナーの検証結果（PASS）と、Read / Glob によるファイル内容の直接確認で行った（ルール 4 の「最終判断はランナーの検証結果に従う」に合致）。
+- ワークツリーには他タスクの `src/index.mjs` / `slugify.mjs` / `truncate.mjs` / `wordcount.mjs` が既に存在するが、本タスクの担当は `src/contract.mjs` のみ。いずれも変更していない。
+
+次にやるべきこと:
+- なし。タスク完了。`TRUNCATE_DEFAULT_MAX` / `ELLIPSIS` / `WORD_SEPARATOR` の名前・値は今後も変更しない（後続タスクが `./contract.mjs` から import する）。
+
+- [ランナー] 反復 1: 検証 PASS → エージェント 8 ターン / $0.4109 / 完了宣言あり
