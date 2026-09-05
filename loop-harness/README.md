@@ -577,6 +577,8 @@ wave ランナーで回した本物の実行 5 本の集計です（`runs/*/*/wa
 | textkit-revert 再々実行（独立実行 + まとめ + blocked 後） | max_rounds | 6 分 42 秒 | $2.56 | 0 | 2（0、blocked で打ち切り） | 2 | 4（指摘 6 件 → 5 グループ） |
 | textkit-revert 4 回目（--add-dir 後） | max_rounds | 5 分 21 秒 | $1.87 | 0 | 1（0、blocked） | 1 + タスク自身が blocked | 3（指摘 3 件 → 2 グループ） |
 | textkit-revert 5 回目（blocked のタスクを再実行しない） | **blocked** | 4 分 39 秒 | $1.80 | 0 | 1（0、blocked） | 1 + タスク自身が blocked | 3（指摘 4 件 → 1 グループ） |
+| textkit-revert 6 回目（`--priority below-normal`） | blocked | 13 分 6 秒 | $1.60 | 0 | 1（0、blocked） | 1 + タスク自身が blocked | 3（指摘 3 件 → 2 グループ） |
+| textkit 再実行（`--parallel 1`、実装済みの上で） | complete | 6 分 39 秒 | $2.63 | 5 | 0 | 0 | 5（同時に走る内側の claude は常に 1） |
 
 下 4 行は改善を取り込んだ後の再実行で、上の集計には含めていない。5 回目は 4 回目と同じ経過（ラウンド 2 のタスク 06 が `<blocked>` を申告）を辿り、
 wave が「ラウンド上限」ではなく「タスクが『自分では直せない』と申告したため停止」で終わった（`wave-summary.json` の `status` は `blocked`、
@@ -619,6 +621,17 @@ node bin/loop.mjs --task slugify --priority low
 確認: 偽エージェントに `os.getPriority()` を報告させると、`normal` / `below-normal` / `low` でそれぞれ 0 / 10 / 19 が返る（Windows 11、Node 24）。
 未実装の textkit に `--parallel 1 --priority low` でモック wave を回すと、Wave 2 の 3 タスクが 1 つずつ順に起動・完了し、5 本の `loop.mjs` すべてが `low` で走った。
 
+本物の Claude Code での実測（2026-09-05）:
+
+| 実行 | 指定 | 結果 | 所要 | 費用 | 起動 | 観察 |
+|---|---|---|---|---|---|---|
+| textkit-revert 5 回目 | なし | blocked | 4 分 39 秒 | $1.80 | 3 | 比較元 |
+| textkit-revert 6 回目 | `--priority below-normal` | blocked | **13 分 6 秒** | $1.60 | 3 | `wave.mjs` / `loop.mjs` / 内側の `claude.exe -p` がすべて BelowNormal。ターン数と費用は同じで待ち時間だけ伸びた（fix: 12 ターン 80 秒 → 15 ターン 510 秒） |
+| textkit 再実行 | `--parallel 1` | complete | 6 分 39 秒 | $2.63 | 5 | 3 秒おきに数えた内側の `claude -p` は常に 1 本。Wave 2 は 114 + 62 + 90 秒の直列（初回の 3 並列は 155 秒） |
+
+`--priority` は「他の作業を優先させる」目的には効くが、走行中に他のプロセスが CPU を使っていると wave の所要が数倍になる。結果（終了理由・費用）は変わらない。
+急いで結果が欲しいときは `--parallel` だけにする。
+
 ### チューニングの勘所
 
 - 検証が弱いとループは「テストを通すだけ」に収束する。仕様の「やってはいけないこと」を検証に落とせるなら落とす（例: `git diff --quiet -- test/` で test/ 未変更を確認）。
@@ -627,7 +640,7 @@ node bin/loop.mjs --task slugify --priority low
 - Windows でエージェントに PowerShell を使わせる場合、`--allowedTools` に `PowerShell(node:*)` のように別途許可が必要（Bash の許可は PowerShell ツールに効かない）。
 - プロジェクトの `.claude/settings.json` の許可リストは内側のエージェントにも効く。書き系コマンドを足すときは、内側に渡っても問題ないか考える（git はランナーが常に禁止する）。
 - UI の仕様は「クラス名」ではなく「計算済みの色と寸法」で書き、テストもそこを見る。外部プロセスを起動するテストは、起動前に成果物の存在を `assert` する。
-- 本物で回して PC が重いなら、まず `--parallel 1〜2`。それでも他の作業が引っかかるなら `--priority below-normal`。結果は変わらないので、実測の比較には影響しない。
+- 本物で回して PC が重いなら、まず `--parallel 1〜2`。それでも他の作業が引っかかるなら `--priority below-normal`。結果（終了理由・費用）は変わらないが、`--priority` は所要が数倍になることがある（本物で 4 分 39 秒 → 13 分 6 秒）ので、所要の比較には使わない。
 - 同じ失敗が続く原因が環境（依存・権限・ネットワーク・外部ツール）にあるなら、ループでは直らない。`setup.command` に手順を残し、人間が直してから再実行する。
 - `runs/*/iter-NN.md` を読み返して「エージェントが何を見て判断したか」を確認し、仕様・検証・プロンプト文面を直す。この改善サイクル自体がループエンジニアリングです。
   終了時に列挙される「仕様への指摘」（`<spec-issue>`）はその入口になる。

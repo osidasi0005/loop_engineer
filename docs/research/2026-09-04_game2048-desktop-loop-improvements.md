@@ -253,7 +253,7 @@ wave ランナーの spec-issue 集約（項目 5）の本物での確認: `text
 
 | # | 改善 | 実装 | 確認 |
 |---|---|---|---|
-| 13 | PC の負荷を抑える | 本物の wave を回している間、内側の `claude -p` と検証が並列数ぶん同時に走って PC が重くなる。`wave.mjs` に `--parallel N`（`maxParallel` の上書き、1 以上の整数）と、`wave.mjs` / `loop.mjs` に `--priority normal|below-normal|low`（設定 `priority`）を足した。優先度はランナー自身の OS 優先度を `os.setPriority` で下げるだけで、子プロセス（loop.mjs、エージェント、検証）は Windows でも Linux でも引き継ぐ。wave は各タスクと fix の `loop.mjs` に `--priority` を明示して渡す。実装は `bin/lib/priority.mjs` | 偽エージェントに `os.getPriority()` を報告させ、`normal` / `below-normal` / `low` で 0 / 10 / 19 を確認。未実装の textkit のクローンで `--parallel 1 --priority low` のモック wave: Wave 2 の 3 タスクが 1 つずつ順に起動・完了、5 本の `loop.mjs` すべてが `OS 優先度: low` をログに出し、完了まで通常どおり |
+| 13 | PC の負荷を抑える | 本物の wave を回している間、内側の `claude -p` と検証が並列数ぶん同時に走って PC が重くなる。`wave.mjs` に `--parallel N`（`maxParallel` の上書き、1 以上の整数）と、`wave.mjs` / `loop.mjs` に `--priority normal|below-normal|low`（設定 `priority`）を足した。優先度はランナー自身の OS 優先度を `os.setPriority` で下げるだけで、子プロセス（loop.mjs、エージェント、検証）は Windows でも Linux でも引き継ぐ。wave は各タスクと fix の `loop.mjs` に `--priority` を明示して渡す。実装は `bin/lib/priority.mjs` | 偽エージェントに `os.getPriority()` を報告させ、`normal` / `below-normal` / `low` で 0 / 10 / 19 を確認。未実装の textkit のクローンで `--parallel 1 --priority low` のモック wave: Wave 2 の 3 タスクが 1 つずつ順に起動・完了、5 本の `loop.mjs` すべてが `OS 優先度: low` をログに出し、完了まで通常どおり。**本物（2026-09-05）**: textkit-revert 6 回目を `--priority below-normal` で回すと、走行中の `wave.mjs` / `loop.mjs` / 内側の `claude.exe -p` がすべて BelowNormal（デスクトップアプリや他セッションは Normal のまま）。結果は 5 回目と同じ blocked、起動 3 回、$1.60 だが所要は 4 分 39 秒 → 13 分 6 秒（ターン数は同じで待ち時間だけ伸びた。他セッションの node が CPU を使っていた）。textkit を `--parallel 1` で回すと、3 秒おきに数えた内側の `claude -p` は常に 1 本で、Wave 2 は直列 266 秒（初回の 3 並列は 155 秒）、complete / $2.63 / 6 分 39 秒 |
 
 ### textkit-revert の 5 回の推移（同じ題材、同じ結末「差し戻して人に返す」）
 
@@ -264,8 +264,10 @@ wave ランナーの spec-issue 集約（項目 5）の本物での確認: `text
 | 3 | 8〜10 | max_rounds | 6 分 42 秒 | $2.56 | 4 | 6 件 → 5 グループ |
 | 4 | 11 | max_rounds | 5 分 21 秒 | $1.87 | 3 | 3 件 → 2 グループ |
 | 5 | 12 | **blocked** | **4 分 39 秒** | **$1.80** | **3** | 4 件 → **1 グループ** |
+| 6 | 13（`--priority below-normal`） | blocked | 13 分 6 秒 | $1.60 | 3 | 3 件 → 2 グループ |
 
-費用と時間は改善なしの半分以下になり、終了理由は「ラウンド上限」から「タスクが自分では直せないと申告」に変わって、人間が次に何をすべきか
+6 回目は改善 13 の優先度指定の確認で、結末と費用は 5 回目と同じ。所要が 3 倍近いのは優先度を下げた代償（他のプロセスに CPU を譲った）で、改善の後退ではない。
+5 回目までで、費用と時間は改善なしの半分以下になり、終了理由は「ラウンド上限」から「タスクが自分では直せないと申告」に変わって、人間が次に何をすべきか
 （`ELLIPSIS` の契約をどちらにするか決める）が終了時の出力だけで分かるようになった。
 
 モック wave の確認で分かったこと: 05-index の検証は `test/**/*.test.mjs` 全体で、後のタスク（09 slug-length）が足した
