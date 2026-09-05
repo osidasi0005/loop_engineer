@@ -3,17 +3,22 @@
 このファイルは反復をまたぐ唯一の「記憶」です。
 エージェントは毎回ここを読み、作業の最後に追記します。ランナーも検証結果を 1 行ずつ追記します。
 
-
 ### 反復 1
-- やったこと: `src/contract.mjs` の `ELLIPSIS` を `'…'` から `'...'` に変更（JSDoc も「ASCII の 3 文字」に更新し、コメント自体は保持）。他のファイルは変更なし。
-- 分かったこと:
-  - `node --test test-experiments/ellipsis.test.mjs` は 3 pass / 0 fail で PASS。
-  - `src/truncate.mjs` は `ELLIPSIS.length` を使って収める実装なので、契約の値を変えるだけで `truncate('abcdefghij', 6)` → `'abc...'` になった。
-  - 既存の `test/` は `'…'` 前提のため 3 件 FAIL する（contract.test.mjs:6 / truncate.test.mjs:7 / index.test.mjs:11）。
-    仕様が「test/ を変更しない」と明示しているので放置し、spec-issue として報告した。
-- 次にやるべきこと: なし（完了条件 1〜4 をすべて確認済み）。ランナーの検証で PASS を確定させる。
 
-- [ランナー] 反復 1: 検証 FAIL → エージェント 13 ターン / $0.5688 / 完了宣言あり
+やったこと
+- `src/contract.mjs` の `ELLIPSIS` を `'…'` から `'...'` に変更。JSDoc も「省略記号（ASCII の 3 文字）」に更新（コメント文言のみ、各 export の JSDoc は保持）。
+- `node --test test-experiments/ellipsis.test.mjs` を実行 → 3 tests / 3 pass / 0 fail。
+
+分かったこと
+- `src/truncate.mjs` は `max - ELLIPSIS.length` で切っているため、契約の値を変えるだけで `truncate('abcdefghij', 6)` → `'abc...'` になる。`src/truncate.mjs` は未変更。
+- 完了条件の確認: (1) 検証コマンド PASS 済み / (2) 依存追加なし（package.json 未変更）/ (3) `test/` 未変更 / (4) `src/contract.mjs` の 3 つの export すべてに JSDoc あり。変更ファイルは `src/contract.mjs` のみ。
+- 既存の `test/contract.test.mjs`（`ELLIPSIS === '…'` を期待）と `test/index.test.mjs`（`'Hello Wonderful Wor…'` を期待）は、この変更後に必ず落ちる。ただし完了条件は `test-experiments/ellipsis.test.mjs` の PASS のみで、`test/` の変更は禁止されているため、仕様どおり手を付けていない（spec-issue として報告済み）。
+
+次にやるべきこと
+- ランナーの検証結果を待つ。コード側にやり残しはない。
+
+
+- [ランナー] 反復 1: 検証 FAIL → エージェント 11 ターン / $0.4408 / 完了宣言あり
 
 ### ランナー: ラウンド 1 のマージは回帰検証で差し戻し
 マージ後に `node --test test/contract.test.mjs` / `node --test test/contract.test.mjs test/wordcount.test.mjs` / `node --test test/truncate.test.mjs` / `node --test "test/**/*.test.mjs"` が失敗した（4/6 本）（fix ループでも直らなかった。fix エージェントは「実装側では直せない」と申告）。マージは取り消され、コードは破棄された。
@@ -76,24 +81,25 @@ $ node --test "test/**/*.test.mjs"
   }
 ```
 
-### 反復 1（差し戻し後の再実行）
-- やったこと: コードは変更していない。前回のランナー指示どおり、まず共有契約 `ELLIPSIS` と変更禁止の `test/` の関係を調べ、
-  この仕様が実現不可能であることを確認した。`<blocked>` で人間の判断に返す。
-- 分かったこと:
-  - 現状（`ELLIPSIS = '…'`）で `node --test "test/**/*.test.mjs"` は 20 pass / 0 fail。
-  - `ELLIPSIS` を `'...'` にすると、変更禁止の `test/` が必ず 3 件 FAIL する。回避手段は存在しない:
-    - `test/contract.test.mjs:6` … `assert.equal(ELLIPSIS, '…')` とリテラルで固定。`'...'` とは両立しない。
-    - `test/index.test.mjs:11` … `title: 'Hello Wonderful Wor…'` とリテラルで固定。
-    - `test/truncate.test.mjs:7` … `truncate('abcdefghij', 5)` を `'abcd' + ELLIPSIS` と比較。
-      3 文字の省略記号だと実装は `'ab...'`（5 文字）を返すが、期待値は `'abcd...'`（7 文字）になり矛盾する。
-      この期待値は「省略記号は 1 文字」という前提が式に埋め込まれており、`ELLIPSIS` を参照していても長さ変更に追随しない。
-  - 上の 3 件はランナーがラウンド 1 のマージ後に記録した失敗（`'...' !== '…'` / `'ab...' !== 'abcd...'`）と完全に一致する。
-    つまり fix ループでも直らなかった原因はこれで、実装側（`src/contract.mjs` のみ変更可）では解消できない。
-  - 仕様の完了条件 1（`test-experiments/ellipsis.test.mjs` を PASS）と完了条件 3（`test/` を変更しない）は同時には満たせない。
-    前回はマージまで進んだが回帰検証で差し戻されたので、同じ変更を再投入しても結果は変わらない。
-- 次にやるべきこと: 人間の判断待ち。決着させるには次のどれかが必要:
-  1. `test/contract.test.mjs` / `test/index.test.mjs` / `test/truncate.test.mjs` の更新を仕様で許可する、
-  2. `ELLIPSIS` を変えず `truncate` 側に別の指定（引数やオプション）で ASCII 省略記号を渡す設計にする、
-  3. このタスク自体を取り下げる。
+### 反復 1（ラウンド 2 / 差し戻し後の再実行）
 
-- [ランナー] 反復 1: 検証 FAIL → エージェント 10 ターン / $0.6849
+やったこと
+- ランナーの指示どおり、まず「変更しようとしている契約が他とぶつからないか」を確認した。`src/contract.mjs` は現在 `ELLIPSIS = '…'`（ラウンド 1 のマージ取り消しで元に戻っている）。
+- `test/` 配下の既存テストが `ELLIPSIS` にどう依存しているかを全部読んだ。
+- **コードは一切変更していない。** 変更すると必ず回帰するため（下記）、ルール 6 に従って blocked として返す。
+
+分かったこと（仕様と変更禁止ファイルの矛盾。3 箇所で両立不能）
+1. `test/contract.test.mjs:6` — `assert.equal(ELLIPSIS, '…')` とリテラルで固定。`test-experiments/ellipsis.test.mjs:6` は `assert.equal(ELLIPSIS, '...')`。**同一の export に対する正反対の期待**で、`src/contract.mjs` をどう書いても片方は必ず落ちる。
+2. `test/truncate.test.mjs:7` — `assert.equal(truncate('abcdefghij', 5), 'abcd' + ELLIPSIS)`。`ELLIPSIS` を参照しているので一見追随しそうだが、`src/truncate.mjs:11` は `slice(0, max - ELLIPSIS.length) + ELLIPSIS` なので、3 文字にすると実際は `'ab...'`（長さ 5）、期待側は `'abcd...'`（長さ 7）。つまり**このテストは ELLIPSIS が 1 文字である前提**を暗黙に埋め込んでいる。
+3. `test/index.test.mjs:15` — `title: 'Hello Wonderful Wor…'` とリテラルで固定。3 文字化すると `'Hello Wonderful W...'` になり落ちる。
+
+- 回避策がないことの確認: 仕様で変更が許されているのは `src/contract.mjs` の `ELLIPSIS` の値だけ。`src/truncate.mjs` は変更不可、`test/` も変更不可。`ELLIPSIS` は単なる文字列定数で、参照元によって値を変える余地がない（getter 化などは「値だけを変える」という仕様に反し、かつ 1 の直接比較は依然として落ちる）。
+- ラウンド 1 の実績: 値を変えれば `test-experiments/ellipsis.test.mjs` は 3/3 PASS する。つまり**タスク単体の完了条件は満たせるが、満たした瞬間に既存の 4/6 本が落ちる**。ラウンド 1 の fix ループが「実装側では直せない」と申告したのと同じ結論。
+
+次にやるべきこと（人間の判断が必要）
+- 以下のいずれかを決めてほしい。エージェント側の権限では選べない。
+  - (a) このタスク（06 省略記号の ASCII 化）を取り下げる。`ELLIPSIS` は共有契約で、既存テストが 1 文字前提で書かれている。
+  - (b) `test/contract.test.mjs` / `test/truncate.test.mjs` / `test/index.test.mjs` の更新をタスク仕様に含める（＝「`test/` を変更しない」の完了条件を外す）。
+  - (c) `ELLIPSIS` を変えず、新しい定数（例 `ELLIPSIS_ASCII`）を追加する形に仕様を変える。ただし `truncate` の出力を変える以上、(b) と同じ回帰は残る。
+
+- [ランナー] 反復 1: 検証 FAIL → エージェント 12 ターン / $0.5943
